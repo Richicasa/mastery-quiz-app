@@ -21,6 +21,7 @@ import {
   playVictorySound,
   playClickSound,
 } from '../utils/sound.js';
+import { Dither } from './backgrounds/Dither.js';
 
 interface QuizPlayerProps {
   quiz: Quiz;
@@ -211,8 +212,39 @@ export const QuizPlayer: React.FC<QuizPlayerProps> = ({ quiz, onExit }) => {
   };
 
   return (
-    <div className="min-h-[calc(100vh-4rem)] flex flex-col justify-between py-6 px-4 sm:px-6 max-w-5xl mx-auto">
-      {/* Victory Modal if 5/5 reached */}
+    <div className="relative min-h-[calc(100vh-4rem)] w-full overflow-x-hidden bg-[#120f17]">
+      {/* Quizizz Bayer Dither Wave Background */}
+      <div style={{ width: '100%', height: '100%', position: 'absolute', inset: 0, zIndex: 0 }}>
+        <Dither
+          waveColor="#bcbcbc"
+          backgroundColor="#120f17"
+          ditherMode="bayer"
+          colorNum={4}
+          pixelSize={2}
+          waveSpeed={0.05}
+          waveFrequency={3}
+          waveAmplitude={0.3}
+          mouseEffect="erase"
+          mouseRadius={0.3}
+          palette={[]}
+          scale={1}
+          contrast={1}
+          brightness={0}
+          mouseStrength={1}
+          trail={0.5}
+          enableMouseInteraction
+          clickRipple
+          intro
+          disableAnimation={false}
+        />
+      </div>
+
+      {/* Readability backdrop tint */}
+      <div className="absolute inset-0 bg-[#120f17]/75 pointer-events-none z-[1]" />
+
+      {/* Main Quiz Arena */}
+      <div className="relative z-10 min-h-[calc(100vh-4rem)] flex flex-col justify-between py-4 sm:py-6 px-3 sm:px-6 max-w-5xl mx-auto">
+        {/* Victory Modal if 5/5 reached */}
       {showVictory && (
         <VictoryModal
           quizTitle={quiz.title}
@@ -474,5 +506,6 @@ export const QuizPlayer: React.FC<QuizPlayerProps> = ({ quiz, onExit }) => {
         <span>Bucle de Maestría Infinito: La prueba solo terminará al completar 5 rondas consecutivas al 100%.</span>
       </div>
     </div>
+  </div>
   );
 };

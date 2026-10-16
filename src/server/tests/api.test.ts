@@ -74,4 +74,57 @@ describe('Storage & Quiz Lifecycle', () => {
     const found = await getQuizById(sampleQuiz.id);
     expect(found).toBeNull();
   });
+
+  it('soporta aislamiento de pruebas por usuario (userId)', async () => {
+    const userAQuiz: Quiz = {
+      ...sampleQuiz,
+      id: 'quiz_user_a',
+      userId: 'usr_123_alice',
+      authorName: 'Alice',
+      title: 'Prueba de Biología de Alice',
+    };
+
+    const userBQuiz: Quiz = {
+      ...sampleQuiz,
+      id: 'quiz_user_b',
+      userId: 'usr_456_bob',
+      authorName: 'Bob',
+      title: 'Prueba de Biología de Bob',
+    };
+
+    await saveQuiz(userAQuiz);
+    await saveQuiz(userBQuiz);
+
+    const allQuizzes = await getAllQuizzes();
+    const aliceQuizzes = allQuizzes.filter((q) => q.userId === 'usr_123_alice');
+    const bobQuizzes = allQuizzes.filter((q) => q.userId === 'usr_456_bob');
+
+    expect(aliceQuizzes).toHaveLength(1);
+    expect(aliceQuizzes[0].authorName).toBe('Alice');
+    expect(bobQuizzes).toHaveLength(1);
+    expect(bobQuizzes[0].authorName).toBe('Bob');
+
+    // Clean up
+    await deleteQuiz('quiz_user_a');
+    await deleteQuiz('quiz_user_b');
+  });
+
+  it('verifica la racha estricta: un error reinicia la racha a cero', async () => {
+    await saveQuiz(sampleQuiz);
+
+    // Ronda 1 perfecta -> Racha 1
+    let stats = await updateQuizStats(sampleQuiz.id, { bestStreak: 1 });
+    expect(stats?.stats.bestStreak).toBe(1);
+
+    // Ronda 2 perfecta -> Racha 2
+    stats = await updateQuizStats(sampleQuiz.id, { bestStreak: 2 });
+    expect(stats?.stats.bestStreak).toBe(2);
+
+    // Ronda con error -> Racha se reinicia estrictamente a 0
+    stats = await updateQuizStats(sampleQuiz.id, { bestStreak: 0 });
+    expect(stats?.stats.bestStreak).toBe(0);
+
+    // Limpieza
+    await deleteQuiz(sampleQuiz.id);
+  });
 });

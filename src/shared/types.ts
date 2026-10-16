@@ -35,6 +35,7 @@ export interface Quiz {
 export interface UserProfile {
   id: string;
   username: string;
+  password?: string;
   apiKey: string;
   createdAt: string;
 }

@@ -3,9 +3,9 @@ import { Navbar } from './components/Navbar.js';
 import { Dashboard } from './components/Dashboard.js';
 import { CreateQuizModal } from './components/CreateQuizModal.js';
 import { ProfileModal } from './components/ProfileModal.js';
-import { OnboardingGate } from './components/OnboardingGate.js';
+import { AuthScreen } from './components/AuthScreen.js';
 import { QuizPlayer } from './components/QuizPlayer.js';
-import { fetchAllQuizzes, deleteQuizById, getUserProfile, clearUserProfile } from './api.js';
+import { fetchAllQuizzes, deleteQuizById, getActiveSession, clearUserProfile, setActiveSession } from './api.js';
 import { Quiz, UserProfile } from '../shared/types.js';
 
 export const App: React.FC = () => {
@@ -16,11 +16,11 @@ export const App: React.FC = () => {
   const [isProfileModalOpen, setIsProfileModalOpen] = useState(false);
   const [loadingQuizzes, setLoadingQuizzes] = useState(false);
 
-  // Initialize and check user profile on mount
+  // Initialize and check user session on mount: Always require active session!
   useEffect(() => {
-    const profile = getUserProfile();
-    setUserProfileState(profile);
-    if (profile) {
+    const session = getActiveSession();
+    setUserProfileState(session);
+    if (session) {
       loadQuizzes();
     }
   }, []);
@@ -73,9 +73,9 @@ export const App: React.FC = () => {
     }
   };
 
-  // If user has not configured their name and API key, BLOCK everything and show the Onboarding Gate!
+  // If user has no active session, ALWAYS gate with the AuthScreen (FluxLines background)
   if (!userProfile) {
-    return <OnboardingGate onUnlocked={handleProfileUnlocked} />;
+    return <AuthScreen onAuthenticated={handleProfileUnlocked} />;
   }
 
   return (
@@ -124,6 +124,7 @@ export const App: React.FC = () => {
         onClose={() => setIsProfileModalOpen(false)}
         onProfileUpdated={(updated) => {
           setUserProfileState(updated);
+          setActiveSession(updated);
           loadQuizzes();
         }}
       />

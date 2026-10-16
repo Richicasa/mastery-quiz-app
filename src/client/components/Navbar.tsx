@@ -35,23 +35,23 @@ export const Navbar: React.FC<NavbarProps> = ({
         {/* Brand / Logo */}
         <button
           onClick={onGoHome}
-          className="flex items-center gap-3.5 group text-left transition"
+          className="flex items-center gap-2.5 sm:gap-3.5 group text-left transition shrink-0"
         >
-          <div className="w-11 h-11 rounded-2xl bg-gradient-to-tr from-purple-600 via-indigo-600 to-emerald-400 p-[1.5px] shadow-lg shadow-purple-500/20 group-hover:scale-105 transition-transform duration-200">
-            <div className="w-full h-full bg-[#0b0f19] rounded-[14px] flex items-center justify-center">
-              <Sparkles className="w-5 h-5 text-purple-400 group-hover:text-purple-300 transition-colors" />
+          <div className="w-9 h-9 sm:w-11 sm:h-11 rounded-xl sm:rounded-2xl bg-gradient-to-tr from-purple-600 via-indigo-600 to-emerald-400 p-[1.5px] shadow-lg shadow-purple-500/20 group-hover:scale-105 transition-transform duration-200 shrink-0">
+            <div className="w-full h-full bg-[#0b0f19] rounded-[10px] sm:rounded-[14px] flex items-center justify-center">
+              <Sparkles className="w-4 h-4 sm:w-5 sm:h-5 text-purple-400 group-hover:text-purple-300 transition-colors" />
             </div>
           </div>
           <div>
-            <div className="flex items-center gap-2">
-              <span className="text-xl font-black tracking-tight text-white group-hover:text-purple-200 transition-colors">
+            <div className="flex items-center gap-1.5 sm:gap-2">
+              <span className="text-base sm:text-xl font-black tracking-tight text-white group-hover:text-purple-200 transition-colors">
                 MasteryQuiz
               </span>
-              <span className="text-[10px] font-extrabold px-2 py-0.5 rounded-full bg-purple-950/80 border border-purple-700/60 text-purple-300 uppercase tracking-wider">
+              <span className="text-[9px] sm:text-[10px] font-extrabold px-1.5 sm:px-2 py-0.5 rounded-full bg-purple-950/80 border border-purple-700/60 text-purple-300 uppercase tracking-wider">
                 InfiLoop
               </span>
             </div>
-            <p className="text-[11px] text-slate-400 font-medium">
+            <p className="text-[10px] sm:text-[11px] text-slate-400 font-medium hidden xs:block sm:block">
               Interrogación Exhaustiva • Racha 5/5
             </p>
           </div>

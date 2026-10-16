@@ -7,32 +7,72 @@ import {
 } from '../shared/types.js';
 
 const API_BASE = '/api';
-const PROFILE_STORAGE_KEY = 'mastery_user_profile';
+const USERS_STORAGE_KEY = 'mastery_registered_users';
+const SESSION_STORAGE_KEY = 'mastery_active_session';
 
-export function getUserProfile(): UserProfile | null {
+export function getRegisteredUsers(): UserProfile[] {
   try {
-    const raw = localStorage.getItem(PROFILE_STORAGE_KEY);
+    const raw = localStorage.getItem(USERS_STORAGE_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch {
+    return [];
+  }
+}
+
+export function findRegisteredUser(username: string): UserProfile | null {
+  const users = getRegisteredUsers();
+  const clean = username.trim().toLowerCase();
+  return users.find((u) => u.username.trim().toLowerCase() === clean) || null;
+}
+
+export function saveRegisteredUser(profile: UserProfile): void {
+  const users = getRegisteredUsers();
+  const clean = profile.username.trim().toLowerCase();
+  const index = users.findIndex((u) => u.username.trim().toLowerCase() === clean);
+  if (index >= 0) {
+    users[index] = profile;
+  } else {
+    users.unshift(profile);
+  }
+  localStorage.setItem(USERS_STORAGE_KEY, JSON.stringify(users));
+}
+
+export function getActiveSession(): UserProfile | null {
+  try {
+    const raw = sessionStorage.getItem(SESSION_STORAGE_KEY) || localStorage.getItem(SESSION_STORAGE_KEY);
     if (!raw) return null;
-    const profile = JSON.parse(raw) as UserProfile;
-    if (profile.username && profile.apiKey) {
-      return profile;
-    }
-    return null;
+    return JSON.parse(raw) as UserProfile;
   } catch {
     return null;
   }
 }
 
+export function setActiveSession(profile: UserProfile | null): void {
+  if (profile) {
+    sessionStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(profile));
+    localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(profile));
+  } else {
+    sessionStorage.removeItem(SESSION_STORAGE_KEY);
+    localStorage.removeItem(SESSION_STORAGE_KEY);
+  }
+}
+
+// Backward compatibility alias
+export function getUserProfile(): UserProfile | null {
+  return getActiveSession();
+}
+
 export function setUserProfile(profile: UserProfile): void {
-  localStorage.setItem(PROFILE_STORAGE_KEY, JSON.stringify(profile));
+  saveRegisteredUser(profile);
+  setActiveSession(profile);
 }
 
 export function clearUserProfile(): void {
-  localStorage.removeItem(PROFILE_STORAGE_KEY);
+  setActiveSession(null);
 }
 
 export function getStoredApiKey(): string {
-  const profile = getUserProfile();
+  const profile = getActiveSession();
   return profile?.apiKey || '';
 }
 
