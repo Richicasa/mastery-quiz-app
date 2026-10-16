@@ -17,15 +17,57 @@ interface GeminiResponse {
   };
 }
 
+let cachedWorkingModel: string | null = null;
+
+// Dynamically discovers the best model available for the user's API key
+async function getCandidateModels(apiKey: string): Promise<string[]> {
+  const fallbackList = [
+    'gemini-2.0-flash',
+    'gemini-2.5-flash',
+    'gemini-2.5-flash-lite',
+    'gemini-1.5-flash-latest',
+    'gemini-1.5-flash',
+    'gemini-1.5-pro',
+  ];
+
+  try {
+    const res = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`
+    );
+    if (res.ok) {
+      const data: any = await res.json();
+      const models: any[] = data.models || [];
+      const generateModels = models
+        .filter((m) => m.supportedGenerationMethods?.includes('generateContent'))
+        .map((m) => m.name.replace(/^models\//, ''));
+
+      if (generateModels.length > 0) {
+        // Sort according to our preference
+        const sorted = fallbackList.filter((m) => generateModels.includes(m));
+        for (const m of generateModels) {
+          if (!sorted.includes(m)) {
+            sorted.push(m);
+          }
+        }
+        return sorted;
+      }
+    }
+  } catch {
+    // ignore and use fallback
+  }
+
+  return fallbackList;
+}
+
 async function callGemini(
   prompt: string,
   apiKey: string,
   systemInstruction?: string
 ): Promise<string> {
-  const models = ['gemini-2.5-flash', 'gemini-1.5-flash'];
+  const candidateModels = await getCandidateModels(apiKey);
   let lastError: Error | null = null;
 
-  for (const model of models) {
+  for (const model of candidateModels) {
     try {
       const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
       const payload: any = {
@@ -67,12 +109,12 @@ async function callGemini(
       return text;
     } catch (err: any) {
       lastError = err;
-      // If it's model not found, try the next model
+      // If it fails on this model, continue to next candidate
       continue;
     }
   }
 
-  throw lastError || new Error('No se pudo comunicar con la API de Gemini.');
+  throw lastError || new Error('No se pudo comunicar con ningún modelo disponible de la API de Gemini.');
 }
 
 export async function generateQuestionsForParagraph(
@@ -180,33 +222,30 @@ export async function validateGeminiApiKey(
   }
 
   const cleanKey = apiKey.trim();
-  const models = ['gemini-2.5-flash', 'gemini-1.5-flash'];
-  let lastMessage = '';
 
-  for (const model of models) {
-    try {
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${cleanKey}`;
-      const payload = {
-        contents: [{ role: 'user', parts: [{ text: 'Hola' }] }],
-        generationConfig: { maxOutputTokens: 5 },
-      };
+  try {
+    // Direct official call to ModelService.ListModels
+    // This immediately tests credentials and permissions without guessing a model name
+    const url = `https://generativelanguage.googleapis.com/v1beta/models?key=${cleanKey}`;
+    const res = await fetch(url);
 
-      const res = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      });
-
-      if (res.ok) {
+    if (res.ok) {
+      const data: any = await res.json();
+      if (Array.isArray(data.models) && data.models.length > 0) {
         return { valid: true };
       }
-
-      const errData: any = await res.json().catch(() => ({}));
-      lastMessage = errData?.error?.message || `HTTP ${res.status}`;
-    } catch (err: any) {
-      lastMessage = err.message || 'Error de conexión';
+      return { valid: true };
     }
-  }
 
-  return { valid: false, error: lastMessage || 'Clave de Gemini inválida o sin permisos.' };
+    const errData: any = await res.json().catch(() => ({}));
+    const message =
+      errData?.error?.message ||
+      `Error HTTP ${res.status}: Clave API inválida o sin permisos en Google Gemini.`;
+    return { valid: false, error: message };
+  } catch (err: any) {
+    return {
+      valid: false,
+      error: err.message || 'Error de conexión intentando contactar a Google Gemini.',
+    };
+  }
 }
