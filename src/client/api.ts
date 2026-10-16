@@ -1,25 +1,63 @@
-import { Quiz, ExtractionResult, EvaluationResult, QuizStats } from '../shared/types.js';
+import {
+  Quiz,
+  ExtractionResult,
+  EvaluationResult,
+  QuizStats,
+  UserProfile,
+} from '../shared/types.js';
 
 const API_BASE = '/api';
-const STORAGE_KEY = 'mastery_gemini_api_key';
+const PROFILE_STORAGE_KEY = 'mastery_user_profile';
 
-export function getStoredApiKey(): string {
-  return localStorage.getItem(STORAGE_KEY) || '';
+export function getUserProfile(): UserProfile | null {
+  try {
+    const raw = localStorage.getItem(PROFILE_STORAGE_KEY);
+    if (!raw) return null;
+    const profile = JSON.parse(raw) as UserProfile;
+    if (profile.username && profile.apiKey) {
+      return profile;
+    }
+    return null;
+  } catch {
+    return null;
+  }
 }
 
-export function setStoredApiKey(key: string): void {
-  if (key) {
-    localStorage.setItem(STORAGE_KEY, key.trim());
-  } else {
-    localStorage.removeItem(STORAGE_KEY);
-  }
+export function setUserProfile(profile: UserProfile): void {
+  localStorage.setItem(PROFILE_STORAGE_KEY, JSON.stringify(profile));
+}
+
+export function clearUserProfile(): void {
+  localStorage.removeItem(PROFILE_STORAGE_KEY);
+}
+
+export function getStoredApiKey(): string {
+  const profile = getUserProfile();
+  return profile?.apiKey || '';
+}
+
+export async function validateApiKey(
+  apiKey: string
+): Promise<{ valid: boolean; error?: string }> {
+  const res = await fetch(`${API_BASE}/validate-key`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ apiKey }),
+  });
+  return res.json();
 }
 
 function getHeaders(customHeaders: Record<string, string> = {}): Record<string, string> {
   const headers: Record<string, string> = { ...customHeaders };
-  const key = getStoredApiKey();
-  if (key) {
-    headers['x-gemini-key'] = key;
+  const profile = getUserProfile();
+  if (profile?.apiKey) {
+    headers['x-gemini-key'] = profile.apiKey;
+  }
+  if (profile?.id) {
+    headers['x-user-id'] = profile.id;
+  }
+  if (profile?.username) {
+    headers['x-author-name'] = encodeURIComponent(profile.username);
   }
   return headers;
 }
@@ -66,10 +104,18 @@ export async function generateQuiz(
   sourceType: 'document' | 'text',
   sourceName: string
 ): Promise<Quiz> {
+  const profile = getUserProfile();
   const res = await fetch(`${API_BASE}/generate-questions`, {
     method: 'POST',
     headers: getHeaders({ 'Content-Type': 'application/json' }),
-    body: JSON.stringify({ paragraphs, title, sourceType, sourceName }),
+    body: JSON.stringify({
+      paragraphs,
+      title,
+      sourceType,
+      sourceName,
+      userId: profile?.id,
+      authorName: profile?.username,
+    }),
   });
 
   if (!res.ok) {
@@ -98,13 +144,17 @@ export async function evaluateOpenQuestion(
 }
 
 export async function fetchAllQuizzes(): Promise<Quiz[]> {
-  const res = await fetch(`${API_BASE}/quizzes`);
+  const res = await fetch(`${API_BASE}/quizzes`, {
+    headers: getHeaders(),
+  });
   if (!res.ok) throw new Error('Error al cargar las pruebas');
   return res.json();
 }
 
 export async function fetchQuizById(id: string): Promise<Quiz> {
-  const res = await fetch(`${API_BASE}/quizzes/${id}`);
+  const res = await fetch(`${API_BASE}/quizzes/${id}`, {
+    headers: getHeaders(),
+  });
   if (!res.ok) throw new Error('Prueba no encontrada');
   return res.json();
 }
@@ -112,6 +162,7 @@ export async function fetchQuizById(id: string): Promise<Quiz> {
 export async function deleteQuizById(id: string): Promise<void> {
   const res = await fetch(`${API_BASE}/quizzes/${id}`, {
     method: 'DELETE',
+    headers: getHeaders(),
   });
   if (!res.ok) throw new Error('Error al eliminar la prueba');
 }
@@ -122,7 +173,7 @@ export async function updateQuizStats(
 ): Promise<Quiz> {
   const res = await fetch(`${API_BASE}/quizzes/${id}/stats`, {
     method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
+    headers: getHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify(stats),
   });
   if (!res.ok) throw new Error('Error al actualizar estadísticas');

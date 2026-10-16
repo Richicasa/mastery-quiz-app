@@ -2,22 +2,28 @@ import React, { useState, useEffect } from 'react';
 import { Navbar } from './components/Navbar.js';
 import { Dashboard } from './components/Dashboard.js';
 import { CreateQuizModal } from './components/CreateQuizModal.js';
-import { ApiKeyModal } from './components/ApiKeyModal.js';
+import { ProfileModal } from './components/ProfileModal.js';
+import { OnboardingGate } from './components/OnboardingGate.js';
 import { QuizPlayer } from './components/QuizPlayer.js';
-import { fetchAllQuizzes, deleteQuizById, getStoredApiKey } from './api.js';
-import { Quiz } from '../shared/types.js';
+import { fetchAllQuizzes, deleteQuizById, getUserProfile, clearUserProfile } from './api.js';
+import { Quiz, UserProfile } from '../shared/types.js';
 
 export const App: React.FC = () => {
+  const [userProfile, setUserProfileState] = useState<UserProfile | null>(null);
   const [quizzes, setQuizzes] = useState<Quiz[]>([]);
   const [activeQuiz, setActiveQuiz] = useState<Quiz | null>(null);
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
-  const [isApiKeyModalOpen, setIsApiKeyModalOpen] = useState(false);
-  const [hasApiKey, setHasApiKey] = useState(false);
-  const [loadingQuizzes, setLoadingQuizzes] = useState(true);
+  const [isProfileModalOpen, setIsProfileModalOpen] = useState(false);
+  const [loadingQuizzes, setLoadingQuizzes] = useState(false);
 
-  const checkApiKey = () => {
-    setHasApiKey(Boolean(getStoredApiKey()));
-  };
+  // Initialize and check user profile on mount
+  useEffect(() => {
+    const profile = getUserProfile();
+    setUserProfileState(profile);
+    if (profile) {
+      loadQuizzes();
+    }
+  }, []);
 
   const loadQuizzes = async () => {
     try {
@@ -31,10 +37,19 @@ export const App: React.FC = () => {
     }
   };
 
-  useEffect(() => {
-    checkApiKey();
+  const handleProfileUnlocked = (profile: UserProfile) => {
+    setUserProfileState(profile);
     loadQuizzes();
-  }, []);
+  };
+
+  const handleLogout = () => {
+    if (window.confirm('¿Deseas cerrar sesión y cambiar de perfil?')) {
+      clearUserProfile();
+      setUserProfileState(null);
+      setActiveQuiz(null);
+      setQuizzes([]);
+    }
+  };
 
   const handleQuizCreated = (newQuiz: Quiz) => {
     setQuizzes((prev) => [newQuiz, ...prev]);
@@ -58,12 +73,18 @@ export const App: React.FC = () => {
     }
   };
 
+  // If user has not configured their name and API key, BLOCK everything and show the Onboarding Gate!
+  if (!userProfile) {
+    return <OnboardingGate onUnlocked={handleProfileUnlocked} />;
+  }
+
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans">
+    <div className="min-h-screen bg-[#07090e] text-slate-100 flex flex-col font-sans selection:bg-purple-600 selection:text-white">
       <Navbar
-        hasApiKey={hasApiKey}
-        onOpenSettings={() => setIsApiKeyModalOpen(true)}
+        userProfile={userProfile}
+        onOpenSettings={() => setIsProfileModalOpen(true)}
         onGoHome={() => setActiveQuiz(null)}
+        onLogout={handleLogout}
       />
 
       <main className="flex-1">
@@ -77,6 +98,7 @@ export const App: React.FC = () => {
           />
         ) : (
           <Dashboard
+            userProfile={userProfile}
             quizzes={quizzes}
             onOpenCreate={() => setIsCreateModalOpen(true)}
             onSelectQuiz={(quiz) => setActiveQuiz(quiz)}
@@ -92,14 +114,18 @@ export const App: React.FC = () => {
         onQuizCreated={handleQuizCreated}
         onOpenApiKeySettings={() => {
           setIsCreateModalOpen(false);
-          setIsApiKeyModalOpen(true);
+          setIsProfileModalOpen(true);
         }}
       />
 
-      <ApiKeyModal
-        isOpen={isApiKeyModalOpen}
-        onClose={() => setIsApiKeyModalOpen(false)}
-        onKeySaved={checkApiKey}
+      <ProfileModal
+        isOpen={isProfileModalOpen}
+        userProfile={userProfile}
+        onClose={() => setIsProfileModalOpen(false)}
+        onProfileUpdated={(updated) => {
+          setUserProfileState(updated);
+          loadQuizzes();
+        }}
       />
     </div>
   );

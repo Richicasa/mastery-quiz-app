@@ -21,6 +21,8 @@ export interface QuizStats {
 
 export interface Quiz {
   id: string;
+  userId?: string;
+  authorName?: string;
   title: string;
   createdAt: string;
   sourceType: 'document' | 'text';
@@ -28,6 +30,13 @@ export interface Quiz {
   totalParagraphs: number;
   questions: Question[];
   stats: QuizStats;
+}
+
+export interface UserProfile {
+  id: string;
+  username: string;
+  apiKey: string;
+  createdAt: string;
 }
 
 export interface ExtractionResult {

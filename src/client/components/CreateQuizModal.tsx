@@ -11,6 +11,7 @@ import {
 } from 'lucide-react';
 import { extractText, generateQuiz, getStoredApiKey } from '../api.js';
 import { Quiz } from '../../shared/types.js';
+import { playCorrectSound, playIncorrectSound } from '../utils/sound.js';
 
 interface CreateQuizModalProps {
   isOpen: boolean;
@@ -96,12 +97,14 @@ export const CreateQuizModal: React.FC<CreateQuizModalProps> = ({
       );
 
       setStatusMessage('¡Preguntas generadas con éxito! Preparando prueba...');
+      playCorrectSound();
       setTimeout(() => {
         setLoading(false);
         onQuizCreated(createdQuiz);
       }, 500);
     } catch (err: any) {
       console.error(err);
+      playIncorrectSound();
       setErrorMessage(err.message || 'Error al generar la prueba.');
       setLoading(false);
     }

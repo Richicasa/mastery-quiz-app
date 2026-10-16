@@ -1,7 +1,11 @@
 import { Router, Request, Response } from 'express';
 import multer from 'multer';
 import { parseDocumentBuffer, cleanAndSegmentParagraphs } from '../services/documentParser.js';
-import { generateQuestionsForParagraph, evaluateOpenAnswer } from '../services/geminiService.js';
+import {
+  generateQuestionsForParagraph,
+  evaluateOpenAnswer,
+  validateGeminiApiKey,
+} from '../services/geminiService.js';
 import {
   getAllQuizzes,
   getQuizById,
@@ -26,11 +30,26 @@ function getGeminiApiKey(req: Request): string {
   const key = headerKey?.trim() || envKey?.trim();
   if (!key) {
     throw new Error(
-      'Falta la clave API de Gemini. Por favor configúrala en el botón de ajustes en la esquina superior.'
+      'Falta la clave API de Gemini. Por favor configúrala en tu perfil.'
     );
   }
   return key;
 }
+
+// 0. Validar clave de API de Gemini en tiempo real
+apiRouter.post('/validate-key', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const apiKey = req.body.apiKey || req.headers['x-gemini-key'];
+    if (!apiKey) {
+      res.status(400).json({ valid: false, error: 'No se proporcionó ninguna clave API.' });
+      return;
+    }
+    const result = await validateGeminiApiKey(String(apiKey));
+    res.json(result);
+  } catch (err: any) {
+    res.status(500).json({ valid: false, error: err.message || 'Error al validar la clave API.' });
+  }
+});
 
 // 1. Extraer texto y segmentar párrafos
 apiRouter.post(
@@ -107,8 +126,13 @@ apiRouter.post('/generate-questions', async (req: Request, res: Response): Promi
       return;
     }
 
+    const userId = req.body.userId || (req.headers['x-user-id'] as string) || undefined;
+    const authorName = req.body.authorName || (req.headers['x-author-name'] as string) || undefined;
+
     const newQuiz: Quiz = {
       id: `quiz_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+      userId,
+      authorName,
       title: title || 'Prueba sin título',
       createdAt: new Date().toISOString(),
       sourceType: sourceType || 'text',
@@ -155,10 +179,19 @@ apiRouter.post('/evaluate-open-answer', async (req: Request, res: Response): Pro
   }
 });
 
-// 4. Listar todas las pruebas
-apiRouter.get('/quizzes', async (_req: Request, res: Response): Promise<void> => {
+// 4. Listar todas las pruebas (filtradas por usuario si se provee x-user-id)
+apiRouter.get('/quizzes', async (req: Request, res: Response): Promise<void> => {
   try {
     const quizzes = await getAllQuizzes();
+    const userId = (req.headers['x-user-id'] as string)?.trim();
+    if (userId) {
+      // Filtrar por ID de usuario
+      const userQuizzes = quizzes.filter(
+        (q) => !q.userId || q.userId === userId
+      );
+      res.json(userQuizzes);
+      return;
+    }
     res.json(quizzes);
   } catch (err: any) {
     res.status(500).json({ error: err.message });

@@ -15,6 +15,12 @@ import {
 import { Question, Quiz } from '../../shared/types.js';
 import { evaluateOpenQuestion, updateQuizStats } from '../api.js';
 import { VictoryModal } from './VictoryModal.js';
+import {
+  playCorrectSound,
+  playIncorrectSound,
+  playVictorySound,
+  playClickSound,
+} from '../utils/sound.js';
 
 interface QuizPlayerProps {
   quiz: Quiz;
@@ -75,7 +81,10 @@ export const QuizPlayer: React.FC<QuizPlayerProps> = ({ quiz, onExit }) => {
     const isCorrect = option.trim().toLowerCase() === currentQuestion.correctAnswer.trim().toLowerCase();
     setIsAnswerCorrect(isCorrect);
 
-    if (!isCorrect) {
+    if (isCorrect) {
+      playCorrectSound();
+    } else {
+      playIncorrectSound();
       setRoundMistakes((prev) => prev + 1);
     }
   };
@@ -103,7 +112,10 @@ export const QuizPlayer: React.FC<QuizPlayerProps> = ({ quiz, onExit }) => {
             : 'El término introducido no coincide con el concepto clave del párrafo.',
         });
 
-        if (!isCorrect) {
+        if (isCorrect) {
+          playCorrectSound();
+        } else {
+          playIncorrectSound();
           setRoundMistakes((prev) => prev + 1);
         }
       } else {
@@ -118,7 +130,10 @@ export const QuizPlayer: React.FC<QuizPlayerProps> = ({ quiz, onExit }) => {
         setHasAnswered(true);
         setOpenAnswerEvaluation(evaluation);
 
-        if (!evaluation.isCorrect) {
+        if (evaluation.isCorrect) {
+          playCorrectSound();
+        } else {
+          playIncorrectSound();
           setRoundMistakes((prev) => prev + 1);
         }
       }
@@ -131,6 +146,7 @@ export const QuizPlayer: React.FC<QuizPlayerProps> = ({ quiz, onExit }) => {
 
   // Next Question logic + Infinite Mastery Loop (5 Consecutive 100% Rounds)
   const handleNextQuestion = () => {
+    playClickSound();
     if (currentQuestionIndex < quiz.questions.length - 1) {
       setCurrentQuestionIndex((prev) => prev + 1);
     } else {
@@ -151,15 +167,18 @@ export const QuizPlayer: React.FC<QuizPlayerProps> = ({ quiz, onExit }) => {
 
         if (newStreak >= 5) {
           // Final Victory Condition reached!
+          playVictorySound();
           setShowVictory(true);
           return;
         }
 
         // Show brief motivating banner and loop automatically
+        playCorrectSound();
         setRoundNotification(`¡Ronda ${currentRound} al 100%! 🔥 Racha estricta: ${newStreak}/5`);
       } else {
         // Had at least one mistake: Strict streak resets to 0!
         setConsecutivePerfectRounds(0);
+        playIncorrectSound();
         updateQuizStats(quiz.id, {
           completedRounds: quiz.stats.completedRounds + 1,
         }).catch(console.error);

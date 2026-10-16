@@ -171,3 +171,42 @@ Evalúa la respuesta del alumno según las instrucciones.`;
     };
   }
 }
+
+export async function validateGeminiApiKey(
+  apiKey: string
+): Promise<{ valid: boolean; error?: string }> {
+  if (!apiKey || !apiKey.trim()) {
+    return { valid: false, error: 'La clave de API no puede estar vacía.' };
+  }
+
+  const cleanKey = apiKey.trim();
+  const models = ['gemini-2.5-flash', 'gemini-1.5-flash'];
+  let lastMessage = '';
+
+  for (const model of models) {
+    try {
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${cleanKey}`;
+      const payload = {
+        contents: [{ role: 'user', parts: [{ text: 'Hola' }] }],
+        generationConfig: { maxOutputTokens: 5 },
+      };
+
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+
+      if (res.ok) {
+        return { valid: true };
+      }
+
+      const errData: any = await res.json().catch(() => ({}));
+      lastMessage = errData?.error?.message || `HTTP ${res.status}`;
+    } catch (err: any) {
+      lastMessage = err.message || 'Error de conexión';
+    }
+  }
+
+  return { valid: false, error: lastMessage || 'Clave de Gemini inválida o sin permisos.' };
+}
