@@ -12,8 +12,11 @@ import {
   saveQuiz,
   deleteQuiz,
   updateQuizStats,
+  getAllUsers,
+  findUserByUsername,
+  saveUser,
 } from '../services/storageService.js';
-import { Question, Quiz } from '../../shared/types.js';
+import { Question, Quiz, UserProfile } from '../../shared/types.js';
 
 export const apiRouter = Router();
 
@@ -104,8 +107,8 @@ apiRouter.post('/generate-questions', async (req: Request, res: Response): Promi
 
     const allQuestions: Question[] = [];
 
-    // Process paragraphs with concurrency control (batch of 2 at a time for optimal throughput without hitting rate limits)
-    const BATCH_SIZE = 2;
+    // Process paragraphs with concurrency control (batch of 3 at a time)
+    const BATCH_SIZE = 3;
     for (let i = 0; i < paragraphs.length; i += BATCH_SIZE) {
       const slice = paragraphs.slice(i, i + BATCH_SIZE);
       const batchPromises = slice.map((paragraph, indexOffset) => {
@@ -113,9 +116,13 @@ apiRouter.post('/generate-questions', async (req: Request, res: Response): Promi
         return generateQuestionsForParagraph(paragraph, paragraphIndex, apiKey);
       });
 
-      const batchResults = await Promise.all(batchPromises);
-      for (const questions of batchResults) {
-        allQuestions.push(...questions);
+      const batchResults = await Promise.allSettled(batchPromises);
+      for (const result of batchResults) {
+        if (result.status === 'fulfilled') {
+          allQuestions.push(...result.value);
+        } else {
+          console.warn('Advertencia en generación de párrafo:', result.reason);
+        }
       }
     }
 
@@ -238,6 +245,65 @@ apiRouter.put('/quizzes/:id/stats', async (req: Request, res: Response): Promise
       return;
     }
     res.json(updated);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 8. Sincronizar o registrar perfil de usuario en el servidor
+apiRouter.post('/users/sync', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { id, username, apiKey, password } = req.body;
+    if (!username || !username.trim()) {
+      res.status(400).json({ error: 'El nombre o apodo es requerido.' });
+      return;
+    }
+
+    const cleanUsername = username.trim();
+    const existing = await findUserByUsername(cleanUsername);
+
+    const userProfile: UserProfile = {
+      id: id || existing?.id || `usr_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+      username: cleanUsername,
+      apiKey: apiKey || existing?.apiKey || '',
+      password: password !== undefined ? password : existing?.password,
+      createdAt: existing?.createdAt || new Date().toISOString(),
+    };
+
+    const saved = await saveUser(userProfile);
+    res.json(saved);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 9. Buscar perfil de usuario por apodo
+apiRouter.get('/users/find/:username', async (req: Request, res: Response): Promise<void> => {
+  try {
+    const username = String(req.params.username);
+    const found = await findUserByUsername(username);
+    if (!found) {
+      res.status(404).json({ found: false });
+      return;
+    }
+    res.json({ found: true, user: found });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// 10. Listar usuarios registrados
+apiRouter.get('/users', async (_req: Request, res: Response): Promise<void> => {
+  try {
+    const users = await getAllUsers();
+    // Return sanitized profiles
+    const sanitized = users.map((u) => ({
+      id: u.id,
+      username: u.username,
+      hasKey: Boolean(u.apiKey),
+      createdAt: u.createdAt,
+    }));
+    res.json(sanitized);
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }

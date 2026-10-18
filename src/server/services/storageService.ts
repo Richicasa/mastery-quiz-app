@@ -1,9 +1,10 @@
 import fs from 'fs/promises';
 import path from 'path';
-import { Quiz, QuizStats } from '../../shared/types.js';
+import { Quiz, QuizStats, UserProfile } from '../../shared/types.js';
 
 const DATA_DIR = path.resolve(process.cwd(), 'data');
 const DATA_FILE = path.join(DATA_DIR, 'quizzes.json');
+const USERS_FILE = path.join(DATA_DIR, 'users.json');
 
 async function ensureDataFile(): Promise<void> {
   try {
@@ -12,6 +13,44 @@ async function ensureDataFile(): Promise<void> {
   } catch {
     await fs.writeFile(DATA_FILE, JSON.stringify([], null, 2), 'utf-8');
   }
+
+  try {
+    await fs.access(USERS_FILE);
+  } catch {
+    await fs.writeFile(USERS_FILE, JSON.stringify([], null, 2), 'utf-8');
+  }
+}
+
+export async function getAllUsers(): Promise<UserProfile[]> {
+  await ensureDataFile();
+  try {
+    const raw = await fs.readFile(USERS_FILE, 'utf-8');
+    return JSON.parse(raw) as UserProfile[];
+  } catch {
+    return [];
+  }
+}
+
+export async function findUserByUsername(username: string): Promise<UserProfile | null> {
+  const users = await getAllUsers();
+  const clean = username.trim().toLowerCase();
+  return users.find((u) => u.username.trim().toLowerCase() === clean) || null;
+}
+
+export async function saveUser(profile: UserProfile): Promise<UserProfile> {
+  await ensureDataFile();
+  const users = await getAllUsers();
+  const clean = profile.username.trim().toLowerCase();
+  const index = users.findIndex((u) => u.username.trim().toLowerCase() === clean);
+
+  if (index >= 0) {
+    users[index] = { ...users[index], ...profile };
+  } else {
+    users.unshift(profile);
+  }
+
+  await fs.writeFile(USERS_FILE, JSON.stringify(users, null, 2), 'utf-8');
+  return profile;
 }
 
 export async function getAllQuizzes(): Promise<Quiz[]> {

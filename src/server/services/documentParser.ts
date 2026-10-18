@@ -51,8 +51,8 @@ export function cleanAndSegmentParagraphs(rawText: string): string[] {
       .replace(/\s+/g, ' ')
       .trim();
 
-    // Filter out meaningless artifacts (like solitary page numbers, footnote markers, or noise < 30 chars)
-    if (cleaned.length < 25 && !cleaned.endsWith('.')) {
+    // Filter out meaningless artifacts (< 15 chars)
+    if (cleaned.length < 15) {
       continue;
     }
 

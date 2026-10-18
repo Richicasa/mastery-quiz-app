@@ -5,8 +5,11 @@ import {
   getQuizById,
   deleteQuiz,
   updateQuizStats,
+  saveUser,
+  getAllUsers,
+  findUserByUsername,
 } from '../services/storageService.js';
-import { Quiz } from '../../shared/types.js';
+import { Quiz, UserProfile } from '../../shared/types.js';
 
 describe('Storage & Quiz Lifecycle', () => {
   const sampleQuiz: Quiz = {
@@ -126,5 +129,24 @@ describe('Storage & Quiz Lifecycle', () => {
 
     // Limpieza
     await deleteQuiz(sampleQuiz.id);
+  });
+
+  it('guarda, recupera y busca usuarios registrados', async () => {
+    const testUser: UserProfile = {
+      id: 'usr_test_999',
+      username: 'RichiTest',
+      apiKey: 'AIzaSyTestApiKey999',
+      createdAt: new Date().toISOString(),
+    };
+
+    await saveUser(testUser);
+
+    const found = await findUserByUsername('richitest');
+    expect(found).not.toBeNull();
+    expect(found?.username).toBe('RichiTest');
+    expect(found?.apiKey).toBe('AIzaSyTestApiKey999');
+
+    const allUsers = await getAllUsers();
+    expect(allUsers.some((u) => u.username === 'RichiTest')).toBe(true);
   });
 });

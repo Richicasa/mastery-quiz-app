@@ -3,18 +3,17 @@ import {
   Sparkles,
   Key,
   User,
-  Lock,
-  Eye,
-  EyeOff,
   ShieldCheck,
   ExternalLink,
-  ArrowRight,
   Loader2,
   AlertCircle,
   CheckCircle2,
   BrainCircuit,
   LogIn,
   UserPlus,
+  Lock,
+  ChevronDown,
+  ChevronUp,
 } from 'lucide-react';
 import { FluxLines } from './backgrounds/FluxLines.js';
 import {
@@ -23,6 +22,7 @@ import {
   saveRegisteredUser,
   setActiveSession,
   getRegisteredUsers,
+  fetchServerUserByUsername,
 } from '../api.js';
 import { UserProfile } from '../../shared/types.js';
 import { playCorrectSound, playIncorrectSound } from '../utils/sound.js';
@@ -33,129 +33,175 @@ interface AuthScreenProps {
 
 export const AuthScreen: React.FC<AuthScreenProps> = ({ onAuthenticated }) => {
   const [username, setUsername] = useState('');
-  const [password, setPassword] = useState('');
   const [apiKey, setApiKey] = useState('');
-  const [showPassword, setShowPassword] = useState(false);
+  const [password, setPassword] = useState('');
+  const [showAdvanced, setShowAdvanced] = useState(false);
   const [loading, setLoading] = useState(false);
   const [statusMessage, setStatusMessage] = useState('');
   const [errorMessage, setErrorMessage] = useState('');
   const [registeredUsers, setRegisteredUsers] = useState<UserProfile[]>([]);
-  const [isExistingUser, setIsExistingUser] = useState(false);
+  const [existingUser, setExistingUser] = useState<UserProfile | null>(null);
 
   useEffect(() => {
     const users = getRegisteredUsers();
     setRegisteredUsers(users);
     if (users.length > 0) {
-      // Pre-fill with the most recent user
-      setUsername(users[0].username);
-      setIsExistingUser(true);
+      // Pre-select most recent user
+      handleSelectUser(users[0]);
     }
   }, []);
 
-  // Whenever username changes, detect if it's already a registered user
-  const handleUsernameChange = (val: string) => {
-    setUsername(val);
-    const existing = findRegisteredUser(val);
-    setIsExistingUser(Boolean(existing));
-    setErrorMessage('');
-  };
-
-  const handleSelectUserChip = (u: UserProfile) => {
+  const handleSelectUser = (u: UserProfile) => {
     setUsername(u.username);
-    setIsExistingUser(true);
+    setExistingUser(u);
+    setApiKey(u.apiKey || '');
     setPassword('');
     setErrorMessage('');
+    setStatusMessage('');
+  };
+
+  const handleUsernameChange = async (val: string) => {
+    setUsername(val);
+    setErrorMessage('');
+    setStatusMessage('');
+
+    const localFound = findRegisteredUser(val);
+    if (localFound) {
+      setExistingUser(localFound);
+      setApiKey(localFound.apiKey || '');
+      return;
+    }
+
+    setExistingUser(null);
+    setApiKey('');
+
+    // Check server if not in local storage
+    if (val.trim().length >= 2) {
+      const serverFound = await fetchServerUserByUsername(val);
+      if (serverFound) {
+        setExistingUser(serverFound);
+        setApiKey(serverFound.apiKey || '');
+        saveRegisteredUser(serverFound);
+      }
+    }
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMessage('');
+    setStatusMessage('');
 
     const cleanUsername = username.trim();
-    const cleanPassword = password.trim();
+    const cleanKey = apiKey.trim();
 
     if (!cleanUsername) {
       setErrorMessage('Por favor ingresa tu nombre o apodo.');
       return;
     }
 
-    if (!cleanPassword) {
-      setErrorMessage('Por favor ingresa tu contraseña.');
-      return;
-    }
-
-    const existing = findRegisteredUser(cleanUsername);
-
-    if (existing) {
-      // Scenario A: Existing User Logging In
-      if (existing.password && existing.password !== cleanPassword) {
+    // SCENARIO 1: Existing registered user
+    if (existingUser) {
+      // If user had a password configured and entered a mismatch
+      if (existingUser.password && password && existingUser.password !== password.trim()) {
         playIncorrectSound();
-        setErrorMessage('Contraseña incorrecta. Por favor verifica e intenta de nuevo.');
+        setErrorMessage('Contraseña incorrecta para este usuario.');
         return;
       }
 
-      setLoading(true);
-      playCorrectSound();
-      setStatusMessage(`¡Sesión iniciada con éxito! Bienvenido, ${existing.username}.`);
-
-      setActiveSession(existing);
-
-      setTimeout(() => {
-        onAuthenticated(existing);
-      }, 900);
-    } else {
-      // Scenario B: First-Time User Registration
-      const cleanKey = apiKey.trim();
-      if (!cleanKey) {
-        setErrorMessage(
-          'Como es tu primera vez, ingresa tu clave API de Google Gemini para vincularla a tu cuenta.'
-        );
-        return;
-      }
-
-      try {
-        setLoading(true);
-        setStatusMessage('Validando tu clave con Google Gemini...');
-
-        const val = await validateApiKey(cleanKey);
-        if (!val.valid) {
+      // If user updated their API key, re-validate it
+      let finalKey = existingUser.apiKey;
+      if (cleanKey && cleanKey !== existingUser.apiKey && !cleanKey.includes('•')) {
+        try {
+          setLoading(true);
+          setStatusMessage('Validando nueva clave API con Google Gemini...');
+          const val = await validateApiKey(cleanKey);
+          if (!val.valid) {
+            playIncorrectSound();
+            setErrorMessage(val.error || 'La nueva clave API no es válida.');
+            setLoading(false);
+            return;
+          }
+          finalKey = cleanKey;
+        } catch (err: any) {
           playIncorrectSound();
-          setErrorMessage(
-            val.error ||
-              'La clave API no pudo ser validada por Google Gemini. Asegúrate de que esté activa en Google AI Studio.'
-          );
+          setErrorMessage(err.message || 'Error validando la clave API.');
           setLoading(false);
           return;
         }
-
-        playCorrectSound();
-        setStatusMessage(`¡Cuenta creada y conectada! Bienvenido, ${cleanUsername}.`);
-
-        const newProfile: UserProfile = {
-          id: `usr_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
-          username: cleanUsername,
-          password: cleanPassword,
-          apiKey: cleanKey,
-          createdAt: new Date().toISOString(),
-        };
-
-        saveRegisteredUser(newProfile);
-        setActiveSession(newProfile);
-
-        setTimeout(() => {
-          onAuthenticated(newProfile);
-        }, 1000);
-      } catch (err: any) {
-        playIncorrectSound();
-        setErrorMessage(err.message || 'Error de conexión con Google Gemini.');
-        setLoading(false);
       }
+
+      const updatedProfile: UserProfile = {
+        ...existingUser,
+        apiKey: finalKey,
+      };
+
+      saveRegisteredUser(updatedProfile);
+      setActiveSession(updatedProfile);
+
+      setLoading(true);
+      playCorrectSound();
+      setStatusMessage(`¡Sesión iniciada con éxito! Bienvenido, ${existingUser.username}.`);
+
+      setTimeout(() => {
+        onAuthenticated(updatedProfile);
+      }, 700);
+      return;
+    }
+
+    // SCENARIO 2: First-time user registration
+    if (!cleanKey) {
+      setErrorMessage(
+        'Como es tu primera vez, ingresa tu clave API de Google Gemini para vincularla a tu cuenta.'
+      );
+      return;
+    }
+
+    try {
+      setLoading(true);
+      setStatusMessage('Validando tu clave con Google Gemini...');
+
+      const val = await validateApiKey(cleanKey);
+      if (!val.valid) {
+        playIncorrectSound();
+        setErrorMessage(
+          val.error ||
+            'La clave API no pudo ser validada por Google Gemini. Asegúrate de que esté activa en Google AI Studio.'
+        );
+        setLoading(false);
+        return;
+      }
+
+      playCorrectSound();
+      setStatusMessage(`¡Cuenta creada y conectada! Bienvenido, ${cleanUsername}.`);
+
+      const newProfile: UserProfile = {
+        id: `usr_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+        username: cleanUsername,
+        apiKey: cleanKey,
+        password: password.trim() || undefined,
+        createdAt: new Date().toISOString(),
+      };
+
+      saveRegisteredUser(newProfile);
+      setActiveSession(newProfile);
+
+      setTimeout(() => {
+        onAuthenticated(newProfile);
+      }, 800);
+    } catch (err: any) {
+      playIncorrectSound();
+      setErrorMessage(err.message || 'Error de conexión con Google Gemini.');
+      setLoading(false);
     }
   };
 
+  const maskedKeyDisplay = existingUser?.apiKey
+    ? existingUser.apiKey.slice(0, 6) + '••••••••••••••••••••••••' + existingUser.apiKey.slice(-4)
+    : '';
+
   return (
     <div className="relative min-h-screen w-full flex items-center justify-center p-4 sm:p-6 bg-[#07090e] overflow-hidden">
-      {/* User's Exact FluxLines Canvas Background */}
+      {/* FluxLines Background */}
       <div style={{ width: '100%', height: '100%', position: 'absolute', inset: 0, zIndex: 0 }}>
         <FluxLines
           colors={['#ffffff', '#ffffff', '#ffffff']}
@@ -178,7 +224,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onAuthenticated }) => {
         />
       </div>
 
-      {/* Dark tint overlay to ensure high readability */}
+      {/* Dark tint overlay for crystal-clear readability */}
       <div className="absolute inset-0 bg-slate-950/75 pointer-events-none z-[1]" />
 
       {/* Auth Card Container */}
@@ -194,9 +240,9 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onAuthenticated }) => {
             Iniciar Sesión
           </h1>
           <p className="text-slate-400 text-xs sm:text-sm max-w-xs mx-auto">
-            {isExistingUser
-              ? `Bienvenido de vuelta. Ingresa tu contraseña para entrar a tus pruebas.`
-              : `Ingresa tu apodo y contraseña. Si es tu primera vez, asociaremos tu clave de Gemini.`}
+            {existingUser
+              ? `Bienvenido de vuelta, ${existingUser.username}. Presiona el botón para entrar a tus pruebas.`
+              : `Ingresa tu nombre o apodo y tu clave API de Gemini para habilitar tu cuenta personal.`}
           </p>
         </div>
 
@@ -208,10 +254,10 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onAuthenticated }) => {
               <button
                 key={u.id}
                 type="button"
-                onClick={() => handleSelectUserChip(u)}
+                onClick={() => handleSelectUser(u)}
                 className={`px-3 py-1 rounded-xl text-xs font-bold transition flex items-center gap-1.5 shrink-0 ${
                   username.toLowerCase() === u.username.toLowerCase()
-                    ? 'bg-purple-600 text-white shadow-md shadow-purple-600/30'
+                    ? 'bg-purple-600 text-white shadow-md shadow-purple-600/30 ring-2 ring-purple-400/50'
                     : 'bg-slate-900/80 hover:bg-slate-800 text-slate-300 border border-white/5'
                 }`}
               >
@@ -244,9 +290,16 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onAuthenticated }) => {
           <form onSubmit={handleSubmit} className="space-y-4">
             {/* Input 1: Nombre o Apodo */}
             <div>
-              <label className="block text-xs font-bold text-slate-300 uppercase tracking-wider mb-1.5 flex items-center gap-2">
-                <User className="w-3.5 h-3.5 text-purple-400" />
-                <span>Nombre o Apodo</span>
+              <label className="block text-xs font-bold text-slate-300 uppercase tracking-wider mb-1.5 flex items-center justify-between">
+                <span className="flex items-center gap-1.5">
+                  <User className="w-3.5 h-3.5 text-purple-400" />
+                  <span>Nombre o Apodo</span>
+                </span>
+                {existingUser && (
+                  <span className="text-[10px] text-emerald-400 font-bold bg-emerald-950/60 px-2 py-0.5 rounded-full border border-emerald-500/30">
+                    Cuenta Recordada
+                  </span>
+                )}
               </label>
               <input
                 type="text"
@@ -258,59 +311,65 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onAuthenticated }) => {
               />
             </div>
 
-            {/* Input 2: Contraseña */}
+            {/* Input 2: Clave API de Gemini */}
             <div>
-              <label className="block text-xs font-bold text-slate-300 uppercase tracking-wider mb-1.5 flex items-center gap-2">
-                <Lock className="w-3.5 h-3.5 text-indigo-400" />
-                <span>Contraseña</span>
+              <label className="block text-xs font-bold text-slate-300 uppercase tracking-wider mb-1.5 flex items-center justify-between">
+                <span className="flex items-center gap-1.5">
+                  <Key className="w-3.5 h-3.5 text-emerald-400" />
+                  <span>Clave API de Gemini</span>
+                </span>
+                {existingUser && (
+                  <span className="text-[10px] text-purple-400">Vinculada</span>
+                )}
               </label>
-              <div className="relative">
-                <input
-                  type={showPassword ? 'text' : 'password'}
-                  placeholder="Tu contraseña secreta"
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  disabled={loading}
-                  className="w-full bg-slate-950/90 border border-slate-700/80 focus:border-purple-500 rounded-xl px-4 py-3 pr-11 text-sm text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-purple-500/20 transition font-medium"
-                />
-                <button
-                  type="button"
-                  onClick={() => setShowPassword(!showPassword)}
-                  className="absolute right-3.5 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-300 p-1"
+
+              <input
+                type="text"
+                placeholder={existingUser ? maskedKeyDisplay : 'AIzaSy...'}
+                value={apiKey}
+                onChange={(e) => setApiKey(e.target.value)}
+                disabled={loading}
+                className="w-full bg-slate-950/90 border border-slate-700/80 focus:border-purple-500 rounded-xl px-4 py-3 text-sm text-white font-mono placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-purple-500/20 transition"
+              />
+
+              <div className="flex items-center justify-between text-xs text-slate-400 mt-2">
+                <a
+                  href="https://aistudio.google.com/app/apikey"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex items-center gap-1 text-purple-400 hover:text-purple-300 underline font-semibold"
                 >
-                  {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                </button>
+                  <span>Obtener clave gratis en Google AI Studio</span>
+                  <ExternalLink className="w-3 h-3" />
+                </a>
               </div>
             </div>
 
-            {/* Input 3: Gemini API Key (Visible only for first-time registration) */}
-            {!isExistingUser && (
-              <div className="pt-2 border-t border-white/5 animate-fadeIn">
-                <label className="block text-xs font-bold text-slate-300 uppercase tracking-wider mb-1.5 flex items-center gap-2">
-                  <Key className="w-3.5 h-3.5 text-emerald-400" />
-                  <span>Tu Clave API de Gemini (Primera vez)</span>
-                </label>
-                <input
-                  type="password"
-                  placeholder="AIzaSy..."
-                  value={apiKey}
-                  onChange={(e) => setApiKey(e.target.value)}
-                  disabled={loading}
-                  className="w-full bg-slate-950/90 border border-slate-700/80 focus:border-purple-500 rounded-xl px-4 py-3 text-sm text-white font-mono placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-purple-500/20 transition"
-                />
-                <div className="flex items-center justify-between text-xs text-slate-400 mt-2">
-                  <a
-                    href="https://aistudio.google.com/app/apikey"
-                    target="_blank"
-                    rel="noreferrer"
-                    className="inline-flex items-center gap-1 text-purple-400 hover:text-purple-300 underline font-semibold"
-                  >
-                    <span>Obtener clave gratis en Google AI Studio</span>
-                    <ExternalLink className="w-3 h-3" />
-                  </a>
+            {/* Optional Password toggle */}
+            <div className="pt-1">
+              <button
+                type="button"
+                onClick={() => setShowAdvanced(!showAdvanced)}
+                className="text-[11px] text-slate-400 hover:text-slate-200 flex items-center gap-1 transition"
+              >
+                <Lock className="w-3 h-3 text-slate-500" />
+                <span>{showAdvanced ? 'Ocultar contraseña opcional' : 'Añadir contraseña (opcional)'}</span>
+                {showAdvanced ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+              </button>
+
+              {showAdvanced && (
+                <div className="mt-2 animate-fadeIn">
+                  <input
+                    type="password"
+                    placeholder="Contraseña opcional para proteger tu cuenta"
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    disabled={loading}
+                    className="w-full bg-slate-950/90 border border-slate-700/80 focus:border-purple-500 rounded-xl px-4 py-2.5 text-xs text-white placeholder-slate-500 focus:outline-none transition"
+                  />
                 </div>
-              </div>
-            )}
+              )}
+            </div>
 
             {/* Submit Button */}
             <div className="pt-2">
@@ -322,9 +381,9 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onAuthenticated }) => {
                 {loading ? (
                   <>
                     <Loader2 className="w-5 h-5 animate-spin" />
-                    <span>Procesando...</span>
+                    <span>Conectando...</span>
                   </>
-                ) : isExistingUser ? (
+                ) : existingUser ? (
                   <>
                     <LogIn className="w-5 h-5" />
                     <span>Iniciar Sesión como {username || 'Usuario'}</span>
@@ -332,7 +391,7 @@ export const AuthScreen: React.FC<AuthScreenProps> = ({ onAuthenticated }) => {
                 ) : (
                   <>
                     <UserPlus className="w-5 h-5" />
-                    <span>Registrar Cuenta y Entrar</span>
+                    <span>Conectar y Entrar</span>
                   </>
                 )}
               </button>

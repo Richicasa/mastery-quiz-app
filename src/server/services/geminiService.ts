@@ -19,6 +19,15 @@ interface GeminiResponse {
 
 let cachedWorkingModel: string | null = null;
 
+function cleanJsonString(raw: string): string {
+  if (!raw) return '';
+  return raw
+    .trim()
+    .replace(/^```(?:json)?\s*/i, '')
+    .replace(/\s*```$/i, '')
+    .trim();
+}
+
 // Dynamically discovers the best model available for the user's API key
 async function getCandidateModels(apiKey: string): Promise<string[]> {
   const fallbackList = [
@@ -91,7 +100,10 @@ async function callGemini(
 
       const res = await fetch(url, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'x-goog-api-key': apiKey,
+        },
         body: JSON.stringify(payload),
       });
 
@@ -150,8 +162,16 @@ Extrae todas las preguntas posibles de este párrafo en un array JSON.`;
   const rawJson = await callGemini(userPrompt, apiKey, systemInstruction);
 
   try {
-    const parsed = JSON.parse(rawJson);
-    const questionsArray = Array.isArray(parsed) ? parsed : (parsed.questions || []);
+    const cleaned = cleanJsonString(rawJson);
+    const parsed = JSON.parse(cleaned);
+    let questionsArray: any[] = [];
+    if (Array.isArray(parsed)) {
+      questionsArray = parsed;
+    } else if (parsed && Array.isArray(parsed.questions)) {
+      questionsArray = parsed.questions;
+    } else if (parsed && typeof parsed === 'object') {
+      questionsArray = [parsed];
+    }
 
     const result: Question[] = questionsArray.map((q: any, i: number) => ({
       id: `p${paragraphIndex}_q${i}_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
@@ -200,7 +220,8 @@ Evalúa la respuesta del alumno según las instrucciones.`;
   const rawJson = await callGemini(prompt, apiKey, systemInstruction);
 
   try {
-    const parsed = JSON.parse(rawJson);
+    const cleaned = cleanJsonString(rawJson);
+    const parsed = JSON.parse(cleaned);
     return {
       isCorrect: Boolean(parsed.isCorrect),
       feedback: parsed.feedback || (parsed.isCorrect ? '¡Excelente respuesta!' : 'Respuesta incompleta o inexacta.'),
@@ -223,29 +244,68 @@ export async function validateGeminiApiKey(
 
   const cleanKey = apiKey.trim();
 
+  // 1. First attempt: call models list with both header and query param
   try {
-    // Direct official call to ModelService.ListModels
-    // This immediately tests credentials and permissions without guessing a model name
     const url = `https://generativelanguage.googleapis.com/v1beta/models?key=${cleanKey}`;
-    const res = await fetch(url);
+    const res = await fetch(url, {
+      headers: {
+        'x-goog-api-key': cleanKey,
+      },
+    });
 
     if (res.ok) {
-      const data: any = await res.json();
-      if (Array.isArray(data.models) && data.models.length > 0) {
-        return { valid: true };
-      }
       return { valid: true };
     }
 
     const errData: any = await res.json().catch(() => ({}));
-    const message =
-      errData?.error?.message ||
-      `Error HTTP ${res.status}: Clave API inválida o sin permisos en Google Gemini.`;
-    return { valid: false, error: message };
-  } catch (err: any) {
-    return {
-      valid: false,
-      error: err.message || 'Error de conexión intentando contactar a Google Gemini.',
-    };
+    const message = errData?.error?.message || '';
+
+    // If Google explicitly rejected the key as invalid
+    if (message.includes('API key not valid') || message.includes('API_KEY_INVALID')) {
+      return {
+        valid: false,
+        error: 'Tu clave API de Google Gemini no es válida. Por favor cópiala de nuevo desde Google AI Studio.',
+      };
+    }
+  } catch {
+    // Continue to fallback check
   }
+
+  // 2. Second attempt: generateContent ping with popular fast models
+  const pingModels = ['gemini-2.0-flash', 'gemini-2.5-flash', 'gemini-1.5-flash'];
+  for (const model of pingModels) {
+    try {
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${cleanKey}`;
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-goog-api-key': cleanKey,
+        },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: 'ping' }] }],
+        }),
+      });
+
+      if (res.ok) {
+        return { valid: true };
+      }
+
+      const errData: any = await res.json().catch(() => ({}));
+      const message = errData?.error?.message || '';
+      if (message.includes('API key not valid') || message.includes('API_KEY_INVALID')) {
+        return {
+          valid: false,
+          error: 'Tu clave API de Google Gemini no es válida. Por favor cópiala de nuevo desde Google AI Studio.',
+        };
+      }
+    } catch {
+      // Continue to next ping candidate
+    }
+  }
+
+  return {
+    valid: false,
+    error: 'La clave API no pudo ser validada con Google Gemini. Asegúrate de tener conexión y que tu clave esté activa en Google AI Studio.',
+  };
 }

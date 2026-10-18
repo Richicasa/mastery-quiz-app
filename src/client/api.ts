@@ -35,6 +35,24 @@ export function saveRegisteredUser(profile: UserProfile): void {
     users.unshift(profile);
   }
   localStorage.setItem(USERS_STORAGE_KEY, JSON.stringify(users));
+
+  // Also sync to server in background
+  fetch(`${API_BASE}/users/sync`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(profile),
+  }).catch(() => {});
+}
+
+export async function fetchServerUserByUsername(username: string): Promise<UserProfile | null> {
+  try {
+    const res = await fetch(`${API_BASE}/users/find/${encodeURIComponent(username.trim())}`);
+    if (!res.ok) return null;
+    const data = await res.json();
+    return data.found ? (data.user as UserProfile) : null;
+  } catch {
+    return null;
+  }
 }
 
 export function getActiveSession(): UserProfile | null {
