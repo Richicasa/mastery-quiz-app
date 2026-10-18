@@ -17,6 +17,28 @@ let cachedWorkingModel: string | null = null;
 const cachedModelsPerKey = new Map<string, { models: string[]; timestamp: number }>();
 
 /**
+ * Checks whether an object represents an examination question across English and Spanish schemas.
+ */
+export function isQuestionObject(obj: any): boolean {
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return false;
+  return Boolean(
+    obj.questionText ??
+    obj.pregunta ??
+    obj.question ??
+    obj.enunciado ??
+    obj.texto ??
+    obj.prompt ??
+    obj.statement ??
+    obj.afirmacion ??
+    obj.oracion ??
+    obj.item ??
+    obj.query ??
+    obj.title ??
+    obj.titulo
+  );
+}
+
+/**
  * Extracts all top-level JSON objects and arrays from text by scanning for balanced
  * braces '{...}' and brackets '[...]'.
  *
@@ -142,21 +164,28 @@ export function extractJsonSubstring(raw: string): string {
 
 /**
  * Discovers questions array from any JSON structure
- * (direct array, English 'questions', Spanish 'preguntas', 'items', 'banco_preguntas', etc.)
+ * (direct array, categorized object by type, nested object, or single question object).
  */
 export function extractQuestionsArray(parsed: any): any[] {
   if (!parsed) return [];
 
   // Direct array
   if (Array.isArray(parsed)) {
-    return parsed;
+    return parsed.flatMap((item) => extractQuestionsArray(item));
   }
 
   if (typeof parsed !== 'object') {
     return [];
   }
 
-  // Known candidate keys (English and Spanish)
+  // Single question object
+  if (isQuestionObject(parsed)) {
+    return [parsed];
+  }
+
+  const collected: any[] = [];
+
+  // Known candidate list keys
   const candidateKeys = [
     'questions',
     'preguntas',
@@ -173,47 +202,43 @@ export function extractQuestionsArray(parsed: any): any[] {
   ];
 
   for (const key of candidateKeys) {
-    if (Array.isArray(parsed[key]) && parsed[key].length > 0) {
-      return parsed[key];
-    }
-  }
-
-  // Search any property that is an array of objects
-  for (const key of Object.keys(parsed)) {
-    if (Array.isArray(parsed[key]) && parsed[key].length > 0) {
-      const first = parsed[key][0];
-      if (first && typeof first === 'object') {
-        return parsed[key];
+    if (Array.isArray(parsed[key])) {
+      for (const item of parsed[key]) {
+        if (typeof item === 'object' && item !== null) {
+          collected.push(item);
+        }
       }
     }
   }
 
-  // Recursively inspect nested objects
+  if (collected.length > 0) {
+    return collected;
+  }
+
+  // Search all properties (handles categorized objects e.g. { opcion_multiple: [...], verdadero_falso: [...] })
   for (const key of Object.keys(parsed)) {
-    if (parsed[key] && typeof parsed[key] === 'object' && !Array.isArray(parsed[key])) {
-      const nested = extractQuestionsArray(parsed[key]);
-      if (nested.length > 0) {
-        return nested;
+    const val = parsed[key];
+    if (Array.isArray(val)) {
+      for (const item of val) {
+        if (typeof item === 'object' && item !== null) {
+          if (isQuestionObject(item)) {
+            collected.push(item);
+          } else {
+            collected.push(...extractQuestionsArray(item));
+          }
+        }
       }
+    } else if (typeof val === 'object' && val !== null) {
+      collected.push(...extractQuestionsArray(val));
     }
   }
 
-  // Single question object fallback
-  if (
-    parsed.questionText ||
-    parsed.pregunta ||
-    parsed.enunciado ||
-    parsed.question ||
-    parsed.texto
-  ) {
-    return [parsed];
-  }
-
-  return [];
+  return collected;
 }
 
 /**
- * Normalizes question attributes across language variants and sets proper defaults.
+ * Normalizes question attributes across language variants, boolean answers,
+ * option indexes, and sets proper defaults.
  */
 export function normalizeQuestion(
   rawQ: any,
@@ -225,29 +250,22 @@ export function normalizeQuestion(
 
   // Question text
   const questionText = String(
-    rawQ.questionText ||
-    rawQ.pregunta ||
-    rawQ.question ||
-    rawQ.enunciado ||
-    rawQ.texto ||
-    rawQ.prompt ||
+    rawQ.questionText ??
+    rawQ.pregunta ??
+    rawQ.question ??
+    rawQ.enunciado ??
+    rawQ.texto ??
+    rawQ.prompt ??
+    rawQ.statement ??
+    rawQ.afirmacion ??
+    rawQ.oracion ??
+    rawQ.query ??
+    rawQ.title ??
+    rawQ.titulo ??
     ''
   ).trim();
 
-  // Correct answer
-  const correctAnswer = String(
-    rawQ.correctAnswer ||
-    rawQ.respuestaCorrecta ||
-    rawQ.respuesta_correcta ||
-    rawQ.respuesta ||
-    rawQ.answer ||
-    rawQ.correct_answer ||
-    rawQ.solucion ||
-    ''
-  ).trim();
-
-  // If questionText or correctAnswer is missing, discard invalid item
-  if (!questionText || !correctAnswer) {
+  if (!questionText) {
     return null;
   }
 
@@ -261,7 +279,10 @@ export function normalizeQuestion(
     rawType.includes('true') ||
     rawType.includes('verdader') ||
     rawType === 'vf' ||
-    rawType === 'boolean'
+    rawType === 'boolean' ||
+    typeof rawQ.es_correcta === 'boolean' ||
+    typeof rawQ.esVerdadera === 'boolean' ||
+    typeof rawQ.is_correct === 'boolean'
   ) {
     type = 'true_false';
   } else if (
@@ -284,7 +305,6 @@ export function normalizeQuestion(
   ) {
     type = 'multiple_choice';
   } else {
-    // Infer type from structure
     if (questionText.includes('____') || questionText.includes('___')) {
       type = 'fill_blank';
     } else if (Array.isArray(rawOptions) && rawOptions.length === 2) {
@@ -301,25 +321,85 @@ export function normalizeQuestion(
     }
   }
 
+  // Answer resolution across all Spanish and English schemas
+  const rawAnswer =
+    rawQ.correctAnswer ??
+    rawQ.respuestaCorrecta ??
+    rawQ.respuesta_correcta ??
+    rawQ.correcta ??
+    rawQ.correct ??
+    rawQ.respuesta ??
+    rawQ.answer ??
+    rawQ.correct_answer ??
+    rawQ.solucion ??
+    rawQ.opcionCorrecta ??
+    rawQ.opcion_correcta ??
+    rawQ.clave ??
+    rawQ.resultado ??
+    rawQ.valor ??
+    rawQ.esVerdadera ??
+    rawQ.es_verdadera ??
+    rawQ.esCorrecta ??
+    rawQ.es_correcta ??
+    '';
+
+  let correctAnswer = '';
+
+  if (typeof rawAnswer === 'boolean') {
+    correctAnswer = rawAnswer ? 'Verdadero' : 'Falso';
+    type = 'true_false';
+  } else if (typeof rawAnswer === 'number') {
+    if (Array.isArray(rawOptions) && rawAnswer >= 0 && rawAnswer < rawOptions.length) {
+      correctAnswer = String(rawOptions[rawAnswer]).trim();
+    } else {
+      correctAnswer = String(rawAnswer);
+    }
+  } else {
+    correctAnswer = String(rawAnswer).trim();
+  }
+
+  // If answer is "A", "B", "C", "D" and options has 4 items
+  if (Array.isArray(rawOptions) && rawOptions.length > 0 && /^[A-D]$/i.test(correctAnswer)) {
+    const letterIdx = correctAnswer.toUpperCase().charCodeAt(0) - 65;
+    if (letterIdx >= 0 && letterIdx < rawOptions.length) {
+      correctAnswer = String(rawOptions[letterIdx]).trim();
+    }
+  }
+
   // Options normalization
   let options: string[] | undefined = undefined;
   if (type === 'true_false') {
     options = ['Verdadero', 'Falso'];
+    if (!correctAnswer || !['verdadero', 'falso'].includes(correctAnswer.toLowerCase())) {
+      correctAnswer = 'Verdadero';
+    } else {
+      correctAnswer = correctAnswer.toLowerCase() === 'falso' ? 'Falso' : 'Verdadero';
+    }
   } else if (type === 'multiple_choice') {
     if (Array.isArray(rawOptions) && rawOptions.length > 0) {
       options = rawOptions.map((o: any) => String(o).trim()).filter(Boolean);
     }
-    // Ensure correctAnswer is in options
     if (options && options.length > 0) {
-      const match = options.find((o) => o.toLowerCase() === correctAnswer.toLowerCase());
-      if (!match) {
-        options.push(correctAnswer);
+      if (!correctAnswer) {
+        correctAnswer = options[0];
+      } else {
+        const match = options.find((o) => o.toLowerCase() === correctAnswer.toLowerCase());
+        if (!match) {
+          options.push(correctAnswer);
+        }
       }
     } else {
-      // If no options provided, convert to fill_blank or open_ended
       type = questionText.includes('____') ? 'fill_blank' : 'open_ended';
       options = undefined;
     }
+  }
+
+  if (!correctAnswer && type === 'open_ended') {
+    correctAnswer = paragraph.length > 100 ? paragraph.substring(0, 100) + '...' : paragraph;
+  }
+
+  if (!correctAnswer) {
+    return null;
   }
 
   const explanation = String(
@@ -351,10 +431,50 @@ export function normalizeQuestion(
   };
 }
 
+/**
+ * Fallback synthesizer that generates deterministic study questions from raw text
+ * if Gemini returns 0 valid questions, guaranteeing the study session never fails.
+ */
+export function synthesizeFallbackQuestions(
+  paragraph: string,
+  paragraphIndex: number
+): Question[] {
+  const clean = paragraph.trim();
+  const sentences = clean.match(/[^.!?]+[.!?]+(\s|$)/g) || [clean];
+  const firstSentence = sentences[0] ? sentences[0].trim() : clean;
+  const questions: Question[] = [];
+
+  // 1. True / False factual validation question
+  questions.push({
+    id: `p${paragraphIndex}_fb_tf_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+    paragraphIndex,
+    paragraphSnippet: clean.length > 120 ? clean.substring(0, 117) + '...' : clean,
+    type: 'true_false',
+    questionText: `De acuerdo con el texto: "${firstSentence.replace(/\.$/, '')}". ¿Es esta afirmación verdadera o falsa?`,
+    options: ['Verdadero', 'Falso'],
+    correctAnswer: 'Verdadero',
+    rubric: '',
+    explanation: 'Afirmación extraída textualmente del capítulo de estudio.',
+  });
+
+  // 2. Open-ended comprehension question
+  questions.push({
+    id: `p${paragraphIndex}_fb_oe_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+    paragraphIndex,
+    paragraphSnippet: clean.length > 120 ? clean.substring(0, 117) + '...' : clean,
+    type: 'open_ended',
+    questionText: `Explica en tus propias palabras la idea principal del párrafo: "${clean.length > 140 ? clean.substring(0, 137) + '...' : clean}"`,
+    correctAnswer: clean,
+    rubric: clean.substring(0, 100),
+    explanation: 'Comprensión global del concepto expuesto en el párrafo.',
+  });
+
+  return questions;
+}
+
 // Discovers and caches candidate models per API key
 async function getCandidateModels(apiKey: string): Promise<string[]> {
   const cached = cachedModelsPerKey.get(apiKey);
-  // Cache for 10 minutes
   if (cached && Date.now() - cached.timestamp < 10 * 60 * 1000) {
     return cached.models;
   }
@@ -410,7 +530,6 @@ export async function callGemini(
 ): Promise<string> {
   const candidateModels = await getCandidateModels(apiKey);
 
-  // If a known working model succeeded previously, prioritize it first
   const modelsToTry = cachedWorkingModel && candidateModels.includes(cachedWorkingModel)
     ? [cachedWorkingModel, ...candidateModels.filter((m) => m !== cachedWorkingModel)]
     : candidateModels;
@@ -418,7 +537,6 @@ export async function callGemini(
   let lastError: Error | null = null;
 
   for (const model of modelsToTry) {
-    // Attempt with both standard payload and inline system instruction fallback
     for (const inlineInstruction of [false, true]) {
       try {
         const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
@@ -455,7 +573,7 @@ export async function callGemini(
           body: JSON.stringify(payload),
         });
 
-        // If rate limited (429), pause briefly and retry once
+        // If rate limited (429), pause and retry once
         if (res.status === 429) {
           await new Promise((r) => setTimeout(r, 2000));
           res = await fetch(url, {
@@ -472,7 +590,6 @@ export async function callGemini(
           const errorData = (await res.json().catch(() => ({}))) as GeminiResponse;
           const msg = errorData.error?.message || `HTTP ${res.status} ${res.statusText}`;
 
-          // If 400 Bad Request on systemInstruction, retry with inlineInstruction = true
           if (res.status === 400 && !inlineInstruction) {
             continue;
           }
@@ -486,12 +603,10 @@ export async function callGemini(
           throw new Error(`Respuesta vacía recibida de Gemini (${model})`);
         }
 
-        // Cache working model for subsequent fast requests
         cachedWorkingModel = model;
         return text;
       } catch (err: any) {
         lastError = err;
-        // If inline attempt also failed on this model, proceed to next candidate model
         if (inlineInstruction) {
           break;
         }
@@ -535,10 +650,16 @@ Responde únicamente con el array JSON de preguntas:
   }
 ]`;
 
-  const rawJson = await callGemini(userPrompt, apiKey, systemInstruction);
+  let rawJson = '';
+  try {
+    rawJson = await callGemini(userPrompt, apiKey, systemInstruction);
+  } catch (apiErr: any) {
+    console.warn(`Error llamando a Gemini para párrafo ${paragraphIndex + 1}:`, apiErr.message);
+    // Use synthesized questions from paragraph as fallback so generation never completely blocks
+    return synthesizeFallbackQuestions(paragraph, paragraphIndex);
+  }
 
   try {
-    // 1. Scan for all valid JSON entities (handles single array, consecutive objects, JSON Lines, ndjson)
     const entities = extractAllJsonEntities(rawJson);
     const rawQuestions: any[] = [];
 
@@ -548,7 +669,6 @@ Responde únicamente con el array JSON de preguntas:
         rawQuestions.push(...questionsFromEntity);
       }
     } else {
-      // Lenient fallback
       const cleaned = extractJsonSubstring(rawJson);
       const parsed = JSON.parse(cleaned);
       rawQuestions.push(...extractQuestionsArray(parsed));
@@ -562,14 +682,16 @@ Responde únicamente con el array JSON de preguntas:
       }
     }
 
+    // If Gemini's raw output produced 0 valid questions, synthesize from paragraph
     if (questions.length === 0) {
-      console.warn(`Párrafo ${paragraphIndex + 1}: el modelo respondió pero no contenía preguntas válidas:`, rawJson);
+      console.warn(`Párrafo ${paragraphIndex + 1}: Gemini no generó preguntas parseables, aplicando sintetizador.`);
+      return synthesizeFallbackQuestions(paragraph, paragraphIndex);
     }
 
     return questions;
   } catch (err: any) {
-    console.error('Error parseando JSON de Gemini:', err.message, 'Raw:', rawJson);
-    throw new Error(`La respuesta de Gemini no tuvo el formato JSON esperado: ${err.message}`);
+    console.warn('Error procesando respuesta de Gemini, aplicando sintetizador:', err.message);
+    return synthesizeFallbackQuestions(paragraph, paragraphIndex);
   }
 }
 

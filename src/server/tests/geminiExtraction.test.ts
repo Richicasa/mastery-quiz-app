@@ -4,6 +4,7 @@ import {
   extractAllJsonEntities,
   extractQuestionsArray,
   normalizeQuestion,
+  synthesizeFallbackQuestions,
 } from '../services/geminiService.js';
 
 describe('Gemini JSON & Question Extraction Robustness', () => {
@@ -166,5 +167,37 @@ describe('Gemini JSON & Question Extraction Robustness', () => {
     const questions = extractQuestionsArray(entities[0]);
     expect(questions).toHaveLength(1);
     expect(questions[0].correctAnswer).toBe('Musculocutáneo');
+  });
+
+  it('extrae preguntas agrupadas por categoría (opcion_multiple, verdadero_falso)', () => {
+    const categorized = {
+      opcion_multiple: [
+        { enunciado: '¿Qué músculo flexiona el codo?', opciones: ['Braquial', 'Tríceps'], correcta: 0 },
+      ],
+      verdadero_falso: [
+        { afirmacion: 'El tríceps es el principal extensor.', es_correcta: true },
+      ],
+    };
+
+    const extracted = extractQuestionsArray(categorized);
+    expect(extracted).toHaveLength(2);
+
+    const q1 = normalizeQuestion(extracted[0], 'Snippet...', 0, 0);
+    expect(q1).not.toBeNull();
+    expect(q1?.type).toBe('multiple_choice');
+    expect(q1?.correctAnswer).toBe('Braquial');
+
+    const q2 = normalizeQuestion(extracted[1], 'Snippet...', 0, 1);
+    expect(q2).not.toBeNull();
+    expect(q2?.type).toBe('true_false');
+    expect(q2?.correctAnswer).toBe('Verdadero');
+  });
+
+  it('el sintetizador de respaldo genera preguntas válidas a partir de cualquier texto', () => {
+    const text = 'Los músculos del brazo son un grupo de cinco músculos ubicados entre el hombro y el codo.';
+    const synthesized = synthesizeFallbackQuestions(text, 0);
+    expect(synthesized.length).toBeGreaterThanOrEqual(2);
+    expect(synthesized[0].questionText).toContain('Los músculos del brazo');
+    expect(synthesized[0].correctAnswer).toBe('Verdadero');
   });
 });
