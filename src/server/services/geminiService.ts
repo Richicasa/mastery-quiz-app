@@ -39,6 +39,91 @@ export function isQuestionObject(obj: any): boolean {
 }
 
 /**
+ * Alias estables de Google. Apuntan siempre al modelo vigente del momento, de modo
+ * que no caducan cuando Google retira una versión concreta (gemini-2.0-flash y
+ * gemini-2.5-flash ya responden 404 "no longer available to new users").
+ */
+export const PREFERRED_MODELS = [
+  'gemini-flash-latest',
+  'gemini-flash-lite-latest',
+  'gemini-pro-latest',
+  'gemini-2.5-flash',
+  'gemini-2.5-flash-lite',
+  'gemini-2.5-pro',
+  'gemini-2.0-flash',
+];
+
+/**
+ * Modelos que declaran `generateContent` pero NO sirven para producir cuestionarios
+ * de texto: audio (tts), imagen, embeddings, transcripción, investigación, etc.
+ */
+const NON_TEXT_MODEL_PATTERNS = [
+  /tts/,
+  /image/,
+  /embedding/,
+  /transcribe/,
+  /lyria/,
+  /robotics/,
+  /computer-use/,
+  /nano-banana/,
+  /deep-research/,
+  /antigravity/,
+  /omni/,
+  /audio/,
+  /imagen/,
+  /veo/,
+  /^aqa$/,
+];
+
+/**
+ * `models.list` incluye modelos que responden 200 pero no siguen el contrato JSON
+ * (por ejemplo `gemma-4-26b-a4b-it` devuelve su razonamiento en prosa), lo que
+ * envenenaba la cadena de respaldo. Se filtran antes de intentarlos.
+ */
+export function isTextGenerationModel(modelName: string): boolean {
+  const name = String(modelName || '')
+    .replace(/^models\//, '')
+    .toLowerCase();
+  if (!name) return false;
+  // Gemma ignora `systemInstruction` y `responseMimeType` y responde con prosa.
+  if (name.startsWith('gemma')) return false;
+  return !NON_TEXT_MODEL_PATTERNS.some((re) => re.test(name));
+}
+
+/**
+ * Ordena los modelos disponibles: primero los alias estables, después el resto de
+ * modelos de texto. Es una función pura para poder verificarla sin red.
+ */
+export function buildCandidateModelList(availableModels: string[]): string[] {
+  const usable = (availableModels || [])
+    .map((m) => String(m || '').replace(/^models\//, '').trim())
+    .filter((m) => Boolean(m) && isTextGenerationModel(m));
+
+  const unique = Array.from(new Set(usable));
+  const preferred = PREFERRED_MODELS.filter((m) => unique.includes(m));
+  const rest = unique.filter((m) => !preferred.includes(m)).sort();
+  return [...preferred, ...rest];
+}
+
+/**
+ * Comprueba que el texto devuelto por el modelo contenga al menos un JSON parseable.
+ * Sin esto, un 200 con prosa se aceptaba, se memorizaba como "modelo que funciona"
+ * y todas las llamadas siguientes devolvían cero preguntas.
+ */
+export function isUsableJsonResponse(text: string): boolean {
+  if (!text || !text.trim()) return false;
+  if (extractAllJsonEntities(text).length > 0) return true;
+  try {
+    const cleaned = extractJsonSubstring(text);
+    if (!cleaned) return false;
+    JSON.parse(cleaned);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Extracts all top-level JSON objects and arrays from text by scanning for balanced
  * braces '{...}' and brackets '[...]'.
  *
@@ -432,8 +517,11 @@ export function normalizeQuestion(
 }
 
 /**
- * Fallback synthesizer that generates deterministic study questions from raw text
- * if Gemini returns 0 valid questions, guaranteeing the study session never fails.
+ * Sintetizador determinista de preguntas de repuesto.
+ *
+ * NO se usa en el flujo normal: fabricar preguntas de relleno falsearía la racha
+ * de maestría del usuario y ocultaría errores reales de la API. Se conserva
+ * exportado por si en el futuro se ofrece como opción explícita al usuario.
  */
 export function synthesizeFallbackQuestions(
   paragraph: string,
@@ -479,15 +567,6 @@ async function getCandidateModels(apiKey: string): Promise<string[]> {
     return cached.models;
   }
 
-  const standardOrder = [
-    'gemini-2.0-flash',
-    'gemini-1.5-flash',
-    'gemini-1.5-flash-8b',
-    'gemini-2.5-flash',
-    'gemini-2.5-flash-lite',
-    'gemini-1.5-pro',
-  ];
-
   try {
     const res = await fetch(
       `https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`,
@@ -498,36 +577,43 @@ async function getCandidateModels(apiKey: string): Promise<string[]> {
 
     if (res.ok) {
       const data: any = await res.json();
-      const models: any[] = data.models || [];
-      const generateModels = models
-        .filter((m) => m.supportedGenerationMethods?.includes('generateContent'))
-        .map((m) => m.name.replace(/^models\//, ''));
+      const discovered: string[] = (data.models || [])
+        .filter((m: any) => m.supportedGenerationMethods?.includes('generateContent'))
+        .map((m: any) => m.name);
 
-      if (generateModels.length > 0) {
-        const sorted = standardOrder.filter((m) => generateModels.includes(m));
-        for (const m of generateModels) {
-          if (!sorted.includes(m)) {
-            sorted.push(m);
-          }
-        }
-        cachedModelsPerKey.set(apiKey, { models: sorted, timestamp: Date.now() });
-        return sorted;
+      const ordered = buildCandidateModelList(discovered);
+      if (ordered.length > 0) {
+        cachedModelsPerKey.set(apiKey, { models: ordered, timestamp: Date.now() });
+        return ordered;
       }
     }
   } catch {
-    // Ignore and fallback to standard list
+    // Ignore and fallback to the stable alias list
   }
 
-  cachedModelsPerKey.set(apiKey, { models: standardOrder, timestamp: Date.now() });
-  return standardOrder;
+  const fallback = buildCandidateModelList(PREFERRED_MODELS);
+  cachedModelsPerKey.set(apiKey, { models: fallback, timestamp: Date.now() });
+  return fallback;
+}
+
+/** Opciones de `callGemini`. */
+export interface CallGeminiOptions {
+  /**
+   * Valida el texto devuelto por el modelo. Si devuelve `false`, ese modelo se
+   * descarta (no se memoriza) y se prueba el siguiente de la cadena.
+   * Por defecto exige que la respuesta contenga JSON parseable.
+   */
+  accept?: (text: string) => boolean;
 }
 
 // Low-level caller for Gemini with automatic fallback, model caching, and retry on 429
 export async function callGemini(
   prompt: string,
   apiKey: string,
-  systemInstruction?: string
+  systemInstruction?: string,
+  options: CallGeminiOptions = {}
 ): Promise<string> {
+  const accept = options.accept || isUsableJsonResponse;
   const candidateModels = await getCandidateModels(apiKey);
 
   const modelsToTry = cachedWorkingModel && candidateModels.includes(cachedWorkingModel)
@@ -537,6 +623,8 @@ export async function callGemini(
   let lastError: Error | null = null;
 
   for (const model of modelsToTry) {
+    // `inlineInstruction` reintenta el mismo modelo incrustando la instrucción de
+    // sistema en el prompt: algunos modelos no admiten `systemInstruction`.
     for (const inlineInstruction of [false, true]) {
       try {
         const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
@@ -603,13 +691,20 @@ export async function callGemini(
           throw new Error(`Respuesta vacía recibida de Gemini (${model})`);
         }
 
+        // Un 200 no basta: el contenido debe ser utilizable para la tarea pedida.
+        // Si no lo es, el modelo NO se memoriza y se prueba el siguiente.
+        if (!accept(text)) {
+          throw new Error(
+            `El modelo ${model} respondió con texto no utilizable (se esperaba JSON).`
+          );
+        }
+
         cachedWorkingModel = model;
         return text;
       } catch (err: any) {
         lastError = err;
-        if (inlineInstruction) {
-          break;
-        }
+        // Fallo a nivel de modelo: no insistir con el mismo, pasar al siguiente.
+        break;
       }
     }
   }
@@ -652,47 +747,50 @@ Responde únicamente con el array JSON de preguntas:
 
   let rawJson = '';
   try {
-    rawJson = await callGemini(userPrompt, apiKey, systemInstruction);
+    // El modelo solo se acepta si de su respuesta se pueden extraer preguntas reales.
+    // Si devuelve prosa (p. ej. gemma-4) se descarta y se prueba el siguiente modelo.
+    rawJson = await callGemini(userPrompt, apiKey, systemInstruction, {
+      accept: (text) =>
+        extractAllJsonEntities(text).some(
+          (entity) => extractQuestionsArray(entity).length > 0
+        ),
+    });
   } catch (apiErr: any) {
-    console.warn(`Error llamando a Gemini para párrafo ${paragraphIndex + 1}:`, apiErr.message);
-    // Use synthesized questions from paragraph as fallback so generation never completely blocks
-    return synthesizeFallbackQuestions(paragraph, paragraphIndex);
+    // Se propaga el motivo real: nunca se inventan preguntas de relleno que
+    // falsearían la racha de maestría del usuario.
+    throw new Error(
+      `Párrafo #${paragraphIndex + 1}: ${apiErr?.message || 'no se pudo obtener respuesta de Gemini.'}`
+    );
   }
 
-  try {
-    const entities = extractAllJsonEntities(rawJson);
-    const rawQuestions: any[] = [];
+  const entities = extractAllJsonEntities(rawJson);
+  const rawQuestions: any[] = [];
 
-    if (entities.length > 0) {
-      for (const entity of entities) {
-        const questionsFromEntity = extractQuestionsArray(entity);
-        rawQuestions.push(...questionsFromEntity);
-      }
-    } else {
-      const cleaned = extractJsonSubstring(rawJson);
-      const parsed = JSON.parse(cleaned);
-      rawQuestions.push(...extractQuestionsArray(parsed));
+  if (entities.length > 0) {
+    for (const entity of entities) {
+      const questionsFromEntity = extractQuestionsArray(entity);
+      rawQuestions.push(...questionsFromEntity);
     }
-
-    const questions: Question[] = [];
-    for (let i = 0; i < rawQuestions.length; i++) {
-      const normalized = normalizeQuestion(rawQuestions[i], paragraph, paragraphIndex, i);
-      if (normalized) {
-        questions.push(normalized);
-      }
-    }
-
-    // If Gemini's raw output produced 0 valid questions, synthesize from paragraph
-    if (questions.length === 0) {
-      console.warn(`Párrafo ${paragraphIndex + 1}: Gemini no generó preguntas parseables, aplicando sintetizador.`);
-      return synthesizeFallbackQuestions(paragraph, paragraphIndex);
-    }
-
-    return questions;
-  } catch (err: any) {
-    console.warn('Error procesando respuesta de Gemini, aplicando sintetizador:', err.message);
-    return synthesizeFallbackQuestions(paragraph, paragraphIndex);
+  } else {
+    const cleaned = extractJsonSubstring(rawJson);
+    rawQuestions.push(...extractQuestionsArray(JSON.parse(cleaned)));
   }
+
+  const questions: Question[] = [];
+  for (let i = 0; i < rawQuestions.length; i++) {
+    const normalized = normalizeQuestion(rawQuestions[i], paragraph, paragraphIndex, i);
+    if (normalized) {
+      questions.push(normalized);
+    }
+  }
+
+  if (questions.length === 0) {
+    throw new Error(
+      `Párrafo #${paragraphIndex + 1}: Gemini respondió pero ninguna pregunta pudo normalizarse.`
+    );
+  }
+
+  return questions;
 }
 
 export async function evaluateOpenAnswer(
@@ -720,7 +818,16 @@ Respuesta del alumno: "${userAnswer}"
 
 Evalúa la respuesta del alumno según las instrucciones.`;
 
-  const rawJson = await callGemini(prompt, apiKey, systemInstruction);
+  const rawJson = await callGemini(prompt, apiKey, systemInstruction, {
+    accept: (text) =>
+      extractAllJsonEntities(text).some(
+        (e) =>
+          e !== null &&
+          typeof e === 'object' &&
+          !Array.isArray(e) &&
+          ('isCorrect' in e || 'feedback' in e || 'correcto' in e || 'acierto' in e)
+      ),
+  });
 
   try {
     const entities = extractAllJsonEntities(rawJson);
@@ -782,7 +889,7 @@ export async function validateGeminiApiKey(
   }
 
   // 2. Fallback generateContent ping
-  const pingModels = ['gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-2.5-flash'];
+  const pingModels = PREFERRED_MODELS.slice(0, 3);
   for (const model of pingModels) {
     try {
       const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${cleanKey}`;
