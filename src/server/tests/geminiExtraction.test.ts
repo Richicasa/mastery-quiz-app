@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   extractJsonSubstring,
+  extractAllJsonEntities,
   extractQuestionsArray,
   normalizeQuestion,
 } from '../services/geminiService.js';
@@ -111,5 +112,59 @@ describe('Gemini JSON & Question Extraction Robustness', () => {
     const invalid = { tipo: 'multiple_choice' };
     const q = normalizeQuestion(invalid, 'Snippet...', 0, 0);
     expect(q).toBeNull();
+  });
+
+  it('extrae múltiples objetos JSON consecutivos sin corchetes de array (resuelve error de posición 239)', () => {
+    // Simulates the exact payload that previously crashed JSON.parse with "Unexpected non-whitespace character after JSON at position 239"
+    const consecutiveJson = `
+    {
+      "type": "multiple_choice",
+      "questionText": "¿Cuál es la función principal del bíceps braquial?",
+      "options": ["Flexión y supinación", "Extensión", "Abducción", "Pronación"],
+      "correctAnswer": "Flexión y supinación"
+    }
+    {
+      "type": "true_false",
+      "questionText": "El tríceps braquial se ubica en el compartimiento posterior.",
+      "correctAnswer": "Verdadero"
+    }
+    {
+      "type": "open_ended",
+      "questionText": "Explica la inserción del músculo braquial anterior.",
+      "correctAnswer": "Se inserta en la tuberosidad del cúbito y la apófisis coronoides."
+    }
+    `;
+
+    const entities = extractAllJsonEntities(consecutiveJson);
+    expect(entities).toHaveLength(3);
+    expect(entities[0].questionText).toContain('bíceps');
+    expect(entities[1].questionText).toContain('tríceps');
+    expect(entities[2].questionText).toContain('braquial');
+
+    const allQuestions: any[] = [];
+    for (const entity of entities) {
+      allQuestions.push(...extractQuestionsArray(entity));
+    }
+    expect(allQuestions).toHaveLength(3);
+  });
+
+  it('extrae un array JSON aunque venga acompañado de texto o notas al pie', () => {
+    const rawWithCommentary = `
+    [
+      {
+        "type": "multiple_choice",
+        "questionText": "¿Qué nervio inerva al braquial?",
+        "options": ["Musculocutáneo", "Radial", "Axilar", "Mediano"],
+        "correctAnswer": "Musculocutáneo"
+      }
+    ]
+    Nota: Estas fueron todas las preguntas posibles generadas para el párrafo 1.
+    `;
+
+    const entities = extractAllJsonEntities(rawWithCommentary);
+    expect(entities).toHaveLength(1);
+    const questions = extractQuestionsArray(entities[0]);
+    expect(questions).toHaveLength(1);
+    expect(questions[0].correctAnswer).toBe('Musculocutáneo');
   });
 });

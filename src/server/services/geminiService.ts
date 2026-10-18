@@ -17,6 +17,86 @@ let cachedWorkingModel: string | null = null;
 const cachedModelsPerKey = new Map<string, { models: string[]; timestamp: number }>();
 
 /**
+ * Extracts all top-level JSON objects and arrays from text by scanning for balanced
+ * braces '{...}' and brackets '[...]'.
+ *
+ * This completely prevents "Unexpected non-whitespace character after JSON at position X"
+ * errors when LLMs output multiple consecutive JSON objects (JSON Lines, ndjson, or multiple
+ * blocks) instead of a single root array.
+ */
+export function extractAllJsonEntities(text: string): any[] {
+  if (!text || !text.trim()) return [];
+  const results: any[] = [];
+  let depth = 0;
+  let inString = false;
+  let escape = false;
+  let startIdx = -1;
+  let openChar: '{' | '[' | null = null;
+  let closeChar: '}' | ']' | null = null;
+
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+
+    if (inString) {
+      if (escape) {
+        escape = false;
+      } else if (ch === '\\') {
+        escape = true;
+      } else if (ch === '"') {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (ch === '"') {
+      inString = true;
+      continue;
+    }
+
+    if (depth === 0) {
+      if (ch === '{') {
+        openChar = '{';
+        closeChar = '}';
+        depth = 1;
+        startIdx = i;
+      } else if (ch === '[') {
+        openChar = '[';
+        closeChar = ']';
+        depth = 1;
+        startIdx = i;
+      }
+    } else {
+      if (ch === openChar) {
+        depth++;
+      } else if (ch === closeChar) {
+        depth--;
+        if (depth === 0) {
+          const jsonSubstring = text.substring(startIdx, i + 1);
+          try {
+            // Remove trailing commas before parse
+            const sanitized = jsonSubstring.replace(/,\s*([\]}])/g, '$1');
+            const parsed = JSON.parse(sanitized);
+            results.push(parsed);
+          } catch {
+            try {
+              const cleaned = extractJsonSubstring(jsonSubstring);
+              results.push(JSON.parse(cleaned));
+            } catch {
+              // Discard unparseable fragment
+            }
+          }
+          startIdx = -1;
+          openChar = null;
+          closeChar = null;
+        }
+      }
+    }
+  }
+
+  return results;
+}
+
+/**
  * Extracts and cleans a JSON substring from raw text,
  * discarding conversational prefixes, markdown code blocks, or trailing commentary.
  */
@@ -427,7 +507,7 @@ export async function generateQuestionsForParagraph(
   paragraphIndex: number,
   apiKey: string
 ): Promise<Question[]> {
-  const systemInstruction = `Eres un docente universitario implacable. Tu meta es aplicar el método de interrogación exhaustiva: a partir del párrafo proporcionado, debes extraer absolutamente todas las preguntas posibles de examen sin dejar escapar ningún detalle, definición, causa, función o relación anatómica/conceptual.
+  const systemInstruction = `Eres un docente universitario implacable. Tu meta es aplicar el método de estudio de interrogación exhaustiva: a partir del párrafo proporcionado, debes extraer absolutamente todas las preguntas posibles de examen sin dejar escapar ningún detalle, definición, causa, función o relación anatómica/conceptual.
 
 Debes generar una variedad de tipos:
 1. "multiple_choice": 4 opciones (1 correcta y 3 distractores plausibles).
@@ -435,30 +515,44 @@ Debes generar una variedad de tipos:
 3. "fill_blank": Oración con "____" y la palabra faltante exacta en correctAnswer.
 4. "open_ended": Pregunta conceptual o justificativa con rúbrica detallada.
 
-IMPORTANTE: Devuelve EXCLUSIVAMENTE un array JSON válido con objetos según esta estructura:
-[
-  {
-    "type": "multiple_choice",
-    "questionText": "¿Pregunta clara?",
-    "options": ["Opción A", "Opción B", "Opción C", "Opción D"],
-    "correctAnswer": "Opción A",
-    "explanation": "Justificación según el párrafo"
-  }
-]`;
+REGLA DE FORMATO OBLIGATORIA:
+Debes responder con un único array JSON que comience con '[' y termine con ']'.
+Cada elemento del array debe ser un objeto con los campos: "type", "questionText", "options" (para multiple_choice o true_false), "correctAnswer", "rubric" (para open_ended) y "explanation".`;
 
   const userPrompt = `Párrafo a interrogar de manera exhaustiva (Párrafo #${paragraphIndex + 1}):
 """
 ${paragraph}
 """
 
-Extrae todas las preguntas posibles en un array JSON.`;
+Responde únicamente con el array JSON de preguntas:
+[
+  {
+    "type": "multiple_choice",
+    "questionText": "...",
+    "options": ["...", "...", "...", "..."],
+    "correctAnswer": "...",
+    "explanation": "..."
+  }
+]`;
 
   const rawJson = await callGemini(userPrompt, apiKey, systemInstruction);
 
   try {
-    const cleaned = extractJsonSubstring(rawJson);
-    const parsed = JSON.parse(cleaned);
-    const rawQuestions = extractQuestionsArray(parsed);
+    // 1. Scan for all valid JSON entities (handles single array, consecutive objects, JSON Lines, ndjson)
+    const entities = extractAllJsonEntities(rawJson);
+    const rawQuestions: any[] = [];
+
+    if (entities.length > 0) {
+      for (const entity of entities) {
+        const questionsFromEntity = extractQuestionsArray(entity);
+        rawQuestions.push(...questionsFromEntity);
+      }
+    } else {
+      // Lenient fallback
+      const cleaned = extractJsonSubstring(rawJson);
+      const parsed = JSON.parse(cleaned);
+      rawQuestions.push(...extractQuestionsArray(parsed));
+    }
 
     const questions: Question[] = [];
     for (let i = 0; i < rawQuestions.length; i++) {
@@ -507,12 +601,21 @@ Evalúa la respuesta del alumno según las instrucciones.`;
   const rawJson = await callGemini(prompt, apiKey, systemInstruction);
 
   try {
-    const cleaned = extractJsonSubstring(rawJson);
-    const parsed = JSON.parse(cleaned);
-    return {
-      isCorrect: Boolean(parsed.isCorrect),
-      feedback: parsed.feedback || (parsed.isCorrect ? '¡Excelente respuesta!' : 'Respuesta incompleta o inexacta.'),
-    };
+    const entities = extractAllJsonEntities(rawJson);
+    let parsed: any = null;
+    for (const e of entities) {
+      if (typeof e === 'object' && ('isCorrect' in e || 'feedback' in e || 'correcto' in e)) {
+        parsed = e;
+        break;
+      }
+    }
+    if (!parsed) {
+      const cleaned = extractJsonSubstring(rawJson);
+      parsed = JSON.parse(cleaned);
+    }
+    const isCorrect = Boolean(parsed.isCorrect ?? parsed.correcto ?? parsed.acierto);
+    const feedback = parsed.feedback || parsed.retroalimentacion || parsed.explicacion || (isCorrect ? '¡Excelente respuesta!' : 'Respuesta incompleta o inexacta.');
+    return { isCorrect, feedback };
   } catch {
     return {
       isCorrect: false,
