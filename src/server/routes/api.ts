@@ -106,10 +106,15 @@ apiRouter.post('/generate-questions', async (req: Request, res: Response): Promi
     }
 
     const allQuestions: Question[] = [];
+    const errorReasons: string[] = [];
 
-    // Process paragraphs with concurrency control (batch of 3 at a time)
-    const BATCH_SIZE = 3;
+    // Process paragraphs with concurrency control (batch of 2 with spacing to protect Free Tier quota)
+    const BATCH_SIZE = 2;
     for (let i = 0; i < paragraphs.length; i += BATCH_SIZE) {
+      if (i > 0) {
+        await new Promise((r) => setTimeout(r, 350));
+      }
+
       const slice = paragraphs.slice(i, i + BATCH_SIZE);
       const batchPromises = slice.map((paragraph, indexOffset) => {
         const paragraphIndex = i + indexOffset;
@@ -121,14 +126,20 @@ apiRouter.post('/generate-questions', async (req: Request, res: Response): Promi
         if (result.status === 'fulfilled') {
           allQuestions.push(...result.value);
         } else {
+          const reasonMsg = result.reason?.message || String(result.reason);
+          errorReasons.push(reasonMsg);
           console.warn('Advertencia en generación de párrafo:', result.reason);
         }
       }
     }
 
     if (allQuestions.length === 0) {
+      const primaryError = errorReasons.length > 0
+        ? errorReasons[0]
+        : 'No se pudieron extraer preguntas válidas del texto provisto.';
       res.status(422).json({
-        error: 'No se pudieron extraer preguntas válidas del texto provisto.',
+        error: primaryError,
+        details: errorReasons,
       });
       return;
     }

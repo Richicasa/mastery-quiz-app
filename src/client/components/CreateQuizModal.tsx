@@ -140,13 +140,17 @@ export const CreateQuizModal: React.FC<CreateQuizModalProps> = ({
               <AlertCircle className="w-5 h-5 text-red-400 shrink-0 mt-0.5" />
               <span>{errorMessage}</span>
             </div>
-            {errorMessage.includes('clave API') && (
+            {(errorMessage.toLowerCase().includes('clave api') ||
+              errorMessage.toLowerCase().includes('api key') ||
+              errorMessage.toLowerCase().includes('gemini') ||
+              errorMessage.toLowerCase().includes('quota') ||
+              errorMessage.toLowerCase().includes('429')) && (
               <button
                 type="button"
                 onClick={onOpenApiKeySettings}
                 className="shrink-0 px-3 py-1 bg-red-800 hover:bg-red-700 text-white rounded-lg text-xs font-bold transition"
               >
-                Configurar Clave
+                Verificar Clave
               </button>
             )}
           </div>

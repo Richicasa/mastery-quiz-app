@@ -1,9 +1,5 @@
 import { Question, EvaluationResult } from '../../shared/types.js';
 
-interface GeminiContent {
-  parts: Array<{ text: string }>;
-}
-
 interface GeminiResponse {
   candidates?: Array<{
     content?: {
@@ -18,31 +14,288 @@ interface GeminiResponse {
 }
 
 let cachedWorkingModel: string | null = null;
+const cachedModelsPerKey = new Map<string, { models: string[]; timestamp: number }>();
 
-function cleanJsonString(raw: string): string {
+/**
+ * Extracts and cleans a JSON substring from raw text,
+ * discarding conversational prefixes, markdown code blocks, or trailing commentary.
+ */
+export function extractJsonSubstring(raw: string): string {
   if (!raw) return '';
-  return raw
-    .trim()
-    .replace(/^```(?:json)?\s*/i, '')
-    .replace(/\s*```$/i, '')
-    .trim();
+  let str = raw.trim();
+
+  // 1. If wrapped in markdown code fence anywhere in the string
+  const fenceMatch = str.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+  if (fenceMatch && fenceMatch[1].trim()) {
+    str = fenceMatch[1].trim();
+  } else {
+    // 2. Strip conversational preamble before first '[' or '{'
+    const firstBracket = str.indexOf('[');
+    const firstBrace = str.indexOf('{');
+    let startIdx = -1;
+    if (firstBracket !== -1 && firstBrace !== -1) {
+      startIdx = Math.min(firstBracket, firstBrace);
+    } else if (firstBracket !== -1) {
+      startIdx = firstBracket;
+    } else if (firstBrace !== -1) {
+      startIdx = firstBrace;
+    }
+
+    if (startIdx > 0) {
+      str = str.substring(startIdx);
+    }
+
+    // Strip trailing conversational remarks after last ']' or '}'
+    const lastBracket = str.lastIndexOf(']');
+    const lastBrace = str.lastIndexOf('}');
+    const endIdx = Math.max(lastBracket, lastBrace);
+    if (endIdx !== -1 && endIdx < str.length - 1) {
+      str = str.substring(0, endIdx + 1);
+    }
+  }
+
+  // Remove trailing commas before closing braces/brackets (common LLM flaw)
+  str = str.replace(/,\s*([\]}])/g, '$1');
+
+  return str.trim();
 }
 
-// Dynamically discovers the best model available for the user's API key
+/**
+ * Discovers questions array from any JSON structure
+ * (direct array, English 'questions', Spanish 'preguntas', 'items', 'banco_preguntas', etc.)
+ */
+export function extractQuestionsArray(parsed: any): any[] {
+  if (!parsed) return [];
+
+  // Direct array
+  if (Array.isArray(parsed)) {
+    return parsed;
+  }
+
+  if (typeof parsed !== 'object') {
+    return [];
+  }
+
+  // Known candidate keys (English and Spanish)
+  const candidateKeys = [
+    'questions',
+    'preguntas',
+    'banco_preguntas',
+    'bancoPreguntas',
+    'cuestionario',
+    'items',
+    'quiz',
+    'data',
+    'results',
+    'preguntas_posibles',
+    'preguntasGeneradas',
+    'preguntas_generadas',
+  ];
+
+  for (const key of candidateKeys) {
+    if (Array.isArray(parsed[key]) && parsed[key].length > 0) {
+      return parsed[key];
+    }
+  }
+
+  // Search any property that is an array of objects
+  for (const key of Object.keys(parsed)) {
+    if (Array.isArray(parsed[key]) && parsed[key].length > 0) {
+      const first = parsed[key][0];
+      if (first && typeof first === 'object') {
+        return parsed[key];
+      }
+    }
+  }
+
+  // Recursively inspect nested objects
+  for (const key of Object.keys(parsed)) {
+    if (parsed[key] && typeof parsed[key] === 'object' && !Array.isArray(parsed[key])) {
+      const nested = extractQuestionsArray(parsed[key]);
+      if (nested.length > 0) {
+        return nested;
+      }
+    }
+  }
+
+  // Single question object fallback
+  if (
+    parsed.questionText ||
+    parsed.pregunta ||
+    parsed.enunciado ||
+    parsed.question ||
+    parsed.texto
+  ) {
+    return [parsed];
+  }
+
+  return [];
+}
+
+/**
+ * Normalizes question attributes across language variants and sets proper defaults.
+ */
+export function normalizeQuestion(
+  rawQ: any,
+  paragraph: string,
+  paragraphIndex: number,
+  index: number
+): Question | null {
+  if (!rawQ || typeof rawQ !== 'object') return null;
+
+  // Question text
+  const questionText = String(
+    rawQ.questionText ||
+    rawQ.pregunta ||
+    rawQ.question ||
+    rawQ.enunciado ||
+    rawQ.texto ||
+    rawQ.prompt ||
+    ''
+  ).trim();
+
+  // Correct answer
+  const correctAnswer = String(
+    rawQ.correctAnswer ||
+    rawQ.respuestaCorrecta ||
+    rawQ.respuesta_correcta ||
+    rawQ.respuesta ||
+    rawQ.answer ||
+    rawQ.correct_answer ||
+    rawQ.solucion ||
+    ''
+  ).trim();
+
+  // If questionText or correctAnswer is missing, discard invalid item
+  if (!questionText || !correctAnswer) {
+    return null;
+  }
+
+  // Raw type identification
+  const rawType = String(rawQ.type || rawQ.tipo || '').toLowerCase().trim();
+  let rawOptions = rawQ.options || rawQ.opciones || rawQ.choices || rawQ.alternativas;
+
+  let type: Question['type'] = 'multiple_choice';
+
+  if (
+    rawType.includes('true') ||
+    rawType.includes('verdader') ||
+    rawType === 'vf' ||
+    rawType === 'boolean'
+  ) {
+    type = 'true_false';
+  } else if (
+    rawType.includes('blank') ||
+    rawType.includes('complet') ||
+    rawType.includes('llenar')
+  ) {
+    type = 'fill_blank';
+  } else if (
+    rawType.includes('open') ||
+    rawType.includes('abiert') ||
+    rawType.includes('desarrollo') ||
+    rawType.includes('justifi')
+  ) {
+    type = 'open_ended';
+  } else if (
+    rawType.includes('multiple') ||
+    rawType.includes('opcion') ||
+    rawType.includes('seleccion')
+  ) {
+    type = 'multiple_choice';
+  } else {
+    // Infer type from structure
+    if (questionText.includes('____') || questionText.includes('___')) {
+      type = 'fill_blank';
+    } else if (Array.isArray(rawOptions) && rawOptions.length === 2) {
+      const optStr = rawOptions.map((o: any) => String(o).toLowerCase()).join(' ');
+      if (optStr.includes('verdader') || optStr.includes('fals')) {
+        type = 'true_false';
+      } else {
+        type = 'multiple_choice';
+      }
+    } else if (Array.isArray(rawOptions) && rawOptions.length > 2) {
+      type = 'multiple_choice';
+    } else {
+      type = 'open_ended';
+    }
+  }
+
+  // Options normalization
+  let options: string[] | undefined = undefined;
+  if (type === 'true_false') {
+    options = ['Verdadero', 'Falso'];
+  } else if (type === 'multiple_choice') {
+    if (Array.isArray(rawOptions) && rawOptions.length > 0) {
+      options = rawOptions.map((o: any) => String(o).trim()).filter(Boolean);
+    }
+    // Ensure correctAnswer is in options
+    if (options && options.length > 0) {
+      const match = options.find((o) => o.toLowerCase() === correctAnswer.toLowerCase());
+      if (!match) {
+        options.push(correctAnswer);
+      }
+    } else {
+      // If no options provided, convert to fill_blank or open_ended
+      type = questionText.includes('____') ? 'fill_blank' : 'open_ended';
+      options = undefined;
+    }
+  }
+
+  const explanation = String(
+    rawQ.explanation ||
+    rawQ.explicacion ||
+    rawQ.justificacion ||
+    rawQ.razon ||
+    ''
+  ).trim();
+
+  const rubric = String(
+    rawQ.rubric ||
+    rawQ.rubrica ||
+    rawQ.criterio ||
+    rawQ.conceptos_clave ||
+    (type === 'open_ended' ? correctAnswer : '')
+  ).trim();
+
+  return {
+    id: `p${paragraphIndex}_q${index}_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+    paragraphIndex,
+    paragraphSnippet: paragraph.length > 120 ? paragraph.substring(0, 117) + '...' : paragraph,
+    type,
+    questionText,
+    options,
+    correctAnswer,
+    rubric,
+    explanation,
+  };
+}
+
+// Discovers and caches candidate models per API key
 async function getCandidateModels(apiKey: string): Promise<string[]> {
-  const fallbackList = [
+  const cached = cachedModelsPerKey.get(apiKey);
+  // Cache for 10 minutes
+  if (cached && Date.now() - cached.timestamp < 10 * 60 * 1000) {
+    return cached.models;
+  }
+
+  const standardOrder = [
     'gemini-2.0-flash',
+    'gemini-1.5-flash',
+    'gemini-1.5-flash-8b',
     'gemini-2.5-flash',
     'gemini-2.5-flash-lite',
-    'gemini-1.5-flash-latest',
-    'gemini-1.5-flash',
     'gemini-1.5-pro',
   ];
 
   try {
     const res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`
+      `https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`,
+      {
+        headers: { 'x-goog-api-key': apiKey },
+      }
     );
+
     if (res.ok) {
       const data: any = await res.json();
       const models: any[] = data.models || [];
@@ -51,78 +304,118 @@ async function getCandidateModels(apiKey: string): Promise<string[]> {
         .map((m) => m.name.replace(/^models\//, ''));
 
       if (generateModels.length > 0) {
-        // Sort according to our preference
-        const sorted = fallbackList.filter((m) => generateModels.includes(m));
+        const sorted = standardOrder.filter((m) => generateModels.includes(m));
         for (const m of generateModels) {
           if (!sorted.includes(m)) {
             sorted.push(m);
           }
         }
+        cachedModelsPerKey.set(apiKey, { models: sorted, timestamp: Date.now() });
         return sorted;
       }
     }
   } catch {
-    // ignore and use fallback
+    // Ignore and fallback to standard list
   }
 
-  return fallbackList;
+  cachedModelsPerKey.set(apiKey, { models: standardOrder, timestamp: Date.now() });
+  return standardOrder;
 }
 
-async function callGemini(
+// Low-level caller for Gemini with automatic fallback, model caching, and retry on 429
+export async function callGemini(
   prompt: string,
   apiKey: string,
   systemInstruction?: string
 ): Promise<string> {
   const candidateModels = await getCandidateModels(apiKey);
+
+  // If a known working model succeeded previously, prioritize it first
+  const modelsToTry = cachedWorkingModel && candidateModels.includes(cachedWorkingModel)
+    ? [cachedWorkingModel, ...candidateModels.filter((m) => m !== cachedWorkingModel)]
+    : candidateModels;
+
   let lastError: Error | null = null;
 
-  for (const model of candidateModels) {
-    try {
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
-      const payload: any = {
-        contents: [
-          {
-            role: 'user',
-            parts: [{ text: prompt }],
+  for (const model of modelsToTry) {
+    // Attempt with both standard payload and inline system instruction fallback
+    for (const inlineInstruction of [false, true]) {
+      try {
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+
+        const fullPrompt = inlineInstruction && systemInstruction
+          ? `${systemInstruction}\n\n---\n\n${prompt}`
+          : prompt;
+
+        const payload: any = {
+          contents: [
+            {
+              role: 'user',
+              parts: [{ text: fullPrompt }],
+            },
+          ],
+          generationConfig: {
+            responseMimeType: 'application/json',
+            temperature: 0.25,
           },
-        ],
-        generationConfig: {
-          responseMimeType: 'application/json',
-          temperature: 0.3,
-        },
-      };
-
-      if (systemInstruction) {
-        payload.systemInstruction = {
-          parts: [{ text: systemInstruction }],
         };
-      }
 
-      const res = await fetch(url, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-goog-api-key': apiKey,
-        },
-        body: JSON.stringify(payload),
-      });
+        if (systemInstruction && !inlineInstruction) {
+          payload.systemInstruction = {
+            parts: [{ text: systemInstruction }],
+          };
+        }
 
-      if (!res.ok) {
-        const errorData = (await res.json()) as GeminiResponse;
-        const msg = errorData.error?.message || `HTTP ${res.status} ${res.statusText}`;
-        throw new Error(`Error de Gemini API (${model}): ${msg}`);
-      }
+        let res = await fetch(url, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-goog-api-key': apiKey,
+          },
+          body: JSON.stringify(payload),
+        });
 
-      const data = (await res.json()) as GeminiResponse;
-      const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
-      if (!text) {
-        throw new Error(`Respuesta vacía de Gemini (${model})`);
+        // If rate limited (429), pause briefly and retry once
+        if (res.status === 429) {
+          await new Promise((r) => setTimeout(r, 2000));
+          res = await fetch(url, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'x-goog-api-key': apiKey,
+            },
+            body: JSON.stringify(payload),
+          });
+        }
+
+        if (!res.ok) {
+          const errorData = (await res.json().catch(() => ({}))) as GeminiResponse;
+          const msg = errorData.error?.message || `HTTP ${res.status} ${res.statusText}`;
+
+          // If 400 Bad Request on systemInstruction, retry with inlineInstruction = true
+          if (res.status === 400 && !inlineInstruction) {
+            continue;
+          }
+
+          throw new Error(`Error de Gemini (${model}): ${msg}`);
+        }
+
+        const data = (await res.json()) as GeminiResponse;
+        const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+        if (!text || !text.trim()) {
+          throw new Error(`Respuesta vacía recibida de Gemini (${model})`);
+        }
+
+        // Cache working model for subsequent fast requests
+        cachedWorkingModel = model;
+        return text;
+      } catch (err: any) {
+        lastError = err;
+        // If inline attempt also failed on this model, proceed to next candidate model
+        if (inlineInstruction) {
+          break;
+        }
       }
-      return text;
-    } catch (err: any) {
-      lastError = err;
-      // If it fails on this model, continue to next candidate
-      continue;
     }
   }
 
@@ -134,61 +427,55 @@ export async function generateQuestionsForParagraph(
   paragraphIndex: number,
   apiKey: string
 ): Promise<Question[]> {
-  const systemInstruction = `Eres un examinador académico implacable y meticuloso. Tu objetivo es aplicar el método de estudio de interrogación exhaustiva: dado un párrafo, debes extraer y formular ABSOLUTAMENTE TODAS las preguntas posibles que se puedan hacer a partir de su contenido. No dejes escapar ningún detalle, definición, causa, consecuencia, relación o término.
+  const systemInstruction = `Eres un docente universitario implacable. Tu meta es aplicar el método de interrogación exhaustiva: a partir del párrafo proporcionado, debes extraer absolutamente todas las preguntas posibles de examen sin dejar escapar ningún detalle, definición, causa, función o relación anatómica/conceptual.
 
-Genera una variedad amplia de tipologías de preguntas:
-1. "multiple_choice": 4 opciones (1 correcta, 3 distractores plausibles tomados del mismo contexto).
+Debes generar una variedad de tipos:
+1. "multiple_choice": 4 opciones (1 correcta y 3 distractores plausibles).
 2. "true_false": Afirmación con opciones ["Verdadero", "Falso"].
-3. "fill_blank": Una oración con espacio "____" y la palabra clave faltante exacta en correctAnswer.
-4. "open_ended": Pregunta reflexiva o explicativa; debes incluir en "rubric" los conceptos clave indispensables que debe contener la respuesta para ser considerada válida.
+3. "fill_blank": Oración con "____" y la palabra faltante exacta en correctAnswer.
+4. "open_ended": Pregunta conceptual o justificativa con rúbrica detallada.
 
-Cada elemento devuelto en el array JSON debe cumplir esta estructura exacta:
-{
-  "type": "multiple_choice" | "true_false" | "fill_blank" | "open_ended",
-  "questionText": "Pregunta clara y directa",
-  "options": ["Opción 1", "Opción 2", "Opción 3", "Opción 4"], // Solo si type es multiple_choice o true_false
-  "correctAnswer": "Texto de la respuesta correcta o exacta",
-  "rubric": "Conceptos clave requeridos (solo para open_ended)",
-  "explanation": "Breve justificación del porqué es correcto según el párrafo"
-}`;
+IMPORTANTE: Devuelve EXCLUSIVAMENTE un array JSON válido con objetos según esta estructura:
+[
+  {
+    "type": "multiple_choice",
+    "questionText": "¿Pregunta clara?",
+    "options": ["Opción A", "Opción B", "Opción C", "Opción D"],
+    "correctAnswer": "Opción A",
+    "explanation": "Justificación según el párrafo"
+  }
+]`;
 
   const userPrompt = `Párrafo a interrogar de manera exhaustiva (Párrafo #${paragraphIndex + 1}):
 """
 ${paragraph}
 """
 
-Extrae todas las preguntas posibles de este párrafo en un array JSON.`;
+Extrae todas las preguntas posibles en un array JSON.`;
 
   const rawJson = await callGemini(userPrompt, apiKey, systemInstruction);
 
   try {
-    const cleaned = cleanJsonString(rawJson);
+    const cleaned = extractJsonSubstring(rawJson);
     const parsed = JSON.parse(cleaned);
-    let questionsArray: any[] = [];
-    if (Array.isArray(parsed)) {
-      questionsArray = parsed;
-    } else if (parsed && Array.isArray(parsed.questions)) {
-      questionsArray = parsed.questions;
-    } else if (parsed && typeof parsed === 'object') {
-      questionsArray = [parsed];
+    const rawQuestions = extractQuestionsArray(parsed);
+
+    const questions: Question[] = [];
+    for (let i = 0; i < rawQuestions.length; i++) {
+      const normalized = normalizeQuestion(rawQuestions[i], paragraph, paragraphIndex, i);
+      if (normalized) {
+        questions.push(normalized);
+      }
     }
 
-    const result: Question[] = questionsArray.map((q: any, i: number) => ({
-      id: `p${paragraphIndex}_q${i}_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
-      paragraphIndex,
-      paragraphSnippet: paragraph.length > 120 ? paragraph.substring(0, 117) + '...' : paragraph,
-      type: q.type || 'multiple_choice',
-      questionText: q.questionText || '',
-      options: q.options || (q.type === 'true_false' ? ['Verdadero', 'Falso'] : undefined),
-      correctAnswer: q.correctAnswer || '',
-      rubric: q.rubric || '',
-      explanation: q.explanation || '',
-    }));
+    if (questions.length === 0) {
+      console.warn(`Párrafo ${paragraphIndex + 1}: el modelo respondió pero no contenía preguntas válidas:`, rawJson);
+    }
 
-    return result;
+    return questions;
   } catch (err: any) {
-    console.error('Error parseando JSON de Gemini:', rawJson);
-    throw new Error('La respuesta de Gemini no tuvo el formato JSON esperado.');
+    console.error('Error parseando JSON de Gemini:', err.message, 'Raw:', rawJson);
+    throw new Error(`La respuesta de Gemini no tuvo el formato JSON esperado: ${err.message}`);
   }
 }
 
@@ -220,14 +507,13 @@ Evalúa la respuesta del alumno según las instrucciones.`;
   const rawJson = await callGemini(prompt, apiKey, systemInstruction);
 
   try {
-    const cleaned = cleanJsonString(rawJson);
+    const cleaned = extractJsonSubstring(rawJson);
     const parsed = JSON.parse(cleaned);
     return {
       isCorrect: Boolean(parsed.isCorrect),
       feedback: parsed.feedback || (parsed.isCorrect ? '¡Excelente respuesta!' : 'Respuesta incompleta o inexacta.'),
     };
-  } catch (err) {
-    // Fallback if parsing fails
+  } catch {
     return {
       isCorrect: false,
       feedback: 'No se pudo validar con precisión semántica; revisa los conceptos fundamentales del párrafo.',
@@ -244,7 +530,7 @@ export async function validateGeminiApiKey(
 
   const cleanKey = apiKey.trim();
 
-  // 1. First attempt: call models list with both header and query param
+  // 1. Direct ModelService.ListModels call
   try {
     const url = `https://generativelanguage.googleapis.com/v1beta/models?key=${cleanKey}`;
     const res = await fetch(url, {
@@ -260,7 +546,6 @@ export async function validateGeminiApiKey(
     const errData: any = await res.json().catch(() => ({}));
     const message = errData?.error?.message || '';
 
-    // If Google explicitly rejected the key as invalid
     if (message.includes('API key not valid') || message.includes('API_KEY_INVALID')) {
       return {
         valid: false,
@@ -271,8 +556,8 @@ export async function validateGeminiApiKey(
     // Continue to fallback check
   }
 
-  // 2. Second attempt: generateContent ping with popular fast models
-  const pingModels = ['gemini-2.0-flash', 'gemini-2.5-flash', 'gemini-1.5-flash'];
+  // 2. Fallback generateContent ping
+  const pingModels = ['gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-2.5-flash'];
   for (const model of pingModels) {
     try {
       const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${cleanKey}`;
